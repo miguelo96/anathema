@@ -289,7 +289,8 @@ fn run(args: Vec<String>) -> Result<()> {
                     let mut last = std::time::Instant::now();
                     aea::decrypt(&key, &mut z.reader(&e)?, &mut out, &mut |w, t| {
                         if last.elapsed() > std::time::Duration::from_secs(2) {
-                            eprint!("{comp}: decrypting {:5.1}%", w as f64 * 100.0 / t as f64);
+                            eprint!("
+{comp}: decrypting {:5.1}%", w as f64 * 100.0 / t as f64);
                             last = std::time::Instant::now();
                         }
                     })?;
