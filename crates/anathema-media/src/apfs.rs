@@ -419,20 +419,6 @@ impl<'a> Volume<'a> {
         (flags & 0x10 == 0).then_some((self.omap_root, self.xid))
     }
 
-    pub fn first_records(&self, n: usize) -> Result<Vec<(u64, u64, usize)>> {
-        let blk = self.c.omap_lookup(self.omap_root, self.root_tree, self.xid)?.context("root tree not in omap")?;
-        let b = self.c.block(blk)?;
-        let (ks, vs) = root_info(&b);
-        let mut out = Vec::new();
-        let virt = self.child_virt(&b);
-        self.c.walk_node(&b, ks, vs, virt, self.root_tree, &|_| Ordering::Equal, &mut |k, v| {
-            let (i, t) = hdr(k);
-            out.push((i, t, v.len()));
-            Ok(out.len() < n)
-        })?;
-        Ok(out)
-    }
-
     pub fn inode(&self, id: u64) -> Result<Inode> {
         let mut found = None;
         self.scan(id, T_INODE, &mut |_, v| {
@@ -605,7 +591,7 @@ impl<'a> Volume<'a> {
         let rsrc = |s: &Self| -> Result<Vec<u8>> {
             s.xattr(ino.id, "com.apple.ResourceFork")?.context("compressed file without resource fork")
         };
-        let out = match kind {
+        let out = (|| -> Result<Vec<u8>> { Ok(match kind {
             3 => {
                 if inline.first() == Some(&0xff) {
                     inline[1..].to_vec()
@@ -662,7 +648,8 @@ impl<'a> Volume<'a> {
                 out
             }
             other => bail!("unsupported decmpfs type {other}"),
-        };
+        }) })().with_context(|| format!("decmpfs type {kind} size {usize_}"))?;
+
         Ok(Some(out))
     }
 

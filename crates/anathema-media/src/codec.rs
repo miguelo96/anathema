@@ -215,5 +215,8 @@ pub fn block(data: &[u8], raw: usize) -> Result<Vec<u8>> {
     if data.len() == raw {
         return Ok(data.to_vec());
     }
-    lzvn_or_lzfse(data, raw)
+    if data.len() == raw + 1 && data[0] == 0xff {
+        return Ok(data[1..].to_vec());
+    }
+    lzvn_or_lzfse(data, raw).map_err(|e| anyhow!("{e}; chunk len {} want {raw} head {:02x?}", data.len(), &data[..data.len().min(8)]))
 }

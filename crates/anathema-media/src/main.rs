@@ -227,14 +227,6 @@ fn run(args: Vec<String>) -> Result<()> {
                 }
             }
         }
-        "fsdump" => {
-            let img = a.pos.first().context("usage: fsdump <image>")?;
-            let c = apfs::Container::open(Box::new(FileAt::open(Path::new(img))?))?;
-            let v = pick_volume(&c, &a)?;
-            for (i, t, l) in v.first_records(40)? {
-                println!("id {i:#x} type {t} vlen {l}");
-            }
-        }
         "fsls" => {
             let img = a.pos.first().context("usage: fsls <image> [path]")?;
             let c = apfs::Container::open(Box::new(FileAt::open(Path::new(img))?))?;
@@ -267,6 +259,49 @@ fn run(args: Vec<String>) -> Result<()> {
             out.flush()?;
             eprintln!();
             println!("{n} bytes -> {outp}");
+        }
+        "prepare" => {
+            let src = open_source(&resolve_source(&a)?)?;
+            let z = zip::Zip::open(&*src)?;
+            let m = load_manifest(&z)?;
+            let id = identity(&m, &a)?;
+            let dir = out_dir(&a)?.join("images");
+            std::fs::create_dir_all(&dir)?;
+            for (comp, file) in [("KernelCache", "kernelcache.macho"), ("DeviceTree", "devicetree.bin")] {
+                let path = id.path(comp).with_context(|| format!("no {comp} in identity"))?;
+                let (_, data) = im4p::decode(&z.read(path)?)?;
+                std::fs::write(dir.join(file), &data)?;
+                println!("{comp}: {} bytes -> {}", data.len(), dir.join(file).display());
+            }
+            for (comp, file) in [("OS", "system.img"), ("Cryptex1,SystemOS", "cryptex-system.img"), ("Cryptex1,AppOS", "cryptex-app.img"), ("Cryptex1,RosettaOS", "cryptex-rosetta.img")] {
+                let Some(path) = id.path(comp) else { continue };
+                let target = dir.join(file);
+                if target.exists() {
+                    println!("{comp}: {} exists, skipped", target.display());
+                    continue;
+                }
+                let e = z.find(path).with_context(|| format!("{path} missing from the archive"))?.clone();
+                let part = dir.join(format!("{file}.part"));
+                let mut out = BufWriter::with_capacity(4 << 20, File::create(&part)?);
+                if path.ends_with(".aea") {
+                    let h = aea::read_header(&mut z.reader(&e)?)?;
+                    let key = aea::archive_key(&h, &aea::fetch_key_pem(&h)?)?;
+                    let mut last = std::time::Instant::now();
+                    aea::decrypt(&key, &mut z.reader(&e)?, &mut out, &mut |w, t| {
+                        if last.elapsed() > std::time::Duration::from_secs(2) {
+                            eprint!("{comp}: decrypting {:5.1}%", w as f64 * 100.0 / t as f64);
+                            last = std::time::Instant::now();
+                        }
+                    })?;
+                } else {
+                    z.copy_to(&e, &mut out, &mut progress("extracting"))?;
+                }
+                out.flush()?;
+                drop(out);
+                std::fs::rename(&part, &target)?;
+                eprintln!();
+                println!("{comp}: -> {}", target.display());
+            }
         }
         "extract-member" => {
             let member = a.pos.get(1).context("usage: extract-member <ipsw> <member> --out <file>")?;
