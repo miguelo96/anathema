@@ -202,6 +202,33 @@ fn field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
     Some(&r[..e])
 }
 
+fn access_costs(base: u64, order: &[u8]) {
+    let samples: [(&str, u32); 8] = [
+        ("ldr x0,[x1,#8]", 0xf9400420),
+        ("str x0,[x1,#8]", 0xf9000420),
+        ("ldr w0,[x1,x2,lsl #2]", 0xb8627820),
+        ("ldp x29,x30,[sp,#16]", 0xa9417bfd),
+        ("stp x29,x30,[sp,#-16]!", 0xa9bf7bfd),
+        ("ldrb w0,[x1],#1", 0x38401420),
+        ("ldr q0,[x1,#16]", 0x3dc00420),
+        ("ldar x0,[x1]", 0xc8dffc20),
+    ];
+    for (name, model) in [("identity", MemModel::Identity), ("biased", MemModel::Biased), ("checked", MemModel::Checked)] {
+        let mut cfg = Config::with_order(model, order);
+        cfg.pc_base = base;
+        let mut out = String::new();
+        for (n, w) in samples {
+            let words = [w, 0xd65f03c0u32];
+            let bytes: Vec<u8> = words.iter().flat_map(|x| x.to_le_bytes()).collect();
+            let img = Img { base, data: &bytes };
+            let t = translate(&cfg, &img, base);
+            let ret = translate(&cfg, &Img { base, data: &0xd65f03c0u32.to_le_bytes() }, base);
+            out += &format!(" [{}: {} B]", n, t.hot.len() as i64 - ret.hot.len() as i64 + 0);
+        }
+        println!("[{}] hot bytes per access (excl. ret):{}", name, out);
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mut path = format!("{}/anathema-work/kc_text_exec.bin", std::env::var("HOME").unwrap());
@@ -260,6 +287,7 @@ fn main() {
     let mut order: Vec<u8> = (0..33u8).filter(|&g| g != 31).collect();
     order.sort_by(|a, b| uses[*b as usize].cmp(&uses[*a as usize]));
     println!("guest reg static uses, top: {:?}", order.iter().take(12).map(|&g| (g, uses[g as usize])).collect::<Vec<_>>());
+    access_costs(base, &order);
     let mut vorder: Vec<u8> = (0..32u8).collect();
     vorder.sort_by(|a, b| vuses[*b as usize].cmp(&vuses[*a as usize]));
     println!("guest vreg static uses, top: {:?}", vorder.iter().take(14).map(|&g| (g, vuses[g as usize])).collect::<Vec<_>>());

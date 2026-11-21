@@ -587,6 +587,10 @@ fn ldst(w: u32) -> Insn {
             }
         };
     }
+    if w & 0x3f200c00 == 0x19000000 {
+        let imm9 = sext(bits(w, 20, 12), 9);
+        return mkldst(size, bits(w, 23, 22), rt as u8, rsp(rn), Addr::Imm { off: imm9, mode: Mode::Offset });
+    }
     if w & 0xbe000000 == 0x0c000000 {
         return Insn::Unsup("simd-ldst-struct");
     }
