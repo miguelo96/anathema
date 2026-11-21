@@ -1,0 +1,9 @@
+[package]
+name = "anathema-boot"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+uefi = { version = "0.35", features = ["alloc", "global_allocator", "panic_handler"] }
+font8x8 = { version = "0.3", default-features = false }
