@@ -1,0 +1,34 @@
+[package]
+name = "anathema-media"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "anathema_media"
+path = "src/lib.rs"
+
+[[bin]]
+name = "anathema-media"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+sha1 = "0.10"
+sha2 = "0.10"
+hmac = "0.12"
+hkdf = "0.12"
+aes = "0.8"
+ctr = "0.9"
+base64 = "0.22"
+flate2 = "1"
+lzfse_rust = "0.2"
+hpke = { version = "0.13", default-features = false, features = ["alloc", "p256"] }
+p256 = { version = "0.13", features = ["pkcs8", "pem"] }
+serde_json = "1"
+
+
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "native-tls"] }
+
+[target.'cfg(not(any(windows, target_os = "macos")))'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
