@@ -4,6 +4,7 @@
 extern crate alloc;
 
 mod acpi;
+mod bringup;
 mod cpu;
 mod gfx;
 mod input;
@@ -20,9 +21,10 @@ use input::Key;
 use uefi::prelude::*;
 use uefi::runtime::{self, ResetType};
 
-const ENTRIES: [ui::Entry; 5] = [
+const ENTRIES: [ui::Entry; 6] = [
     ui::Entry { label: "Hardware report", hint: "memory, acpi, cpu, pci, display", enabled: true },
     ui::Entry { label: "Readiness check", hint: "blockers found on this pc and our plan", enabled: true },
+    ui::Entry { label: "Bring-up test", hint: "gdt, idt, paging, apic, smp", enabled: true },
     ui::Entry { label: "Boot macOS", hint: "not available in this build", enabled: false },
     ui::Entry { label: "Restart", hint: "reboot the machine", enabled: true },
     ui::Entry { label: "Power off", hint: "shut the machine down", enabled: true },
@@ -41,15 +43,26 @@ fn main() -> Status {
     };
     let subtitle = format!("boot loader {}", ui::VERSION);
     let info = screen.info.clone();
-    let (report, inventory) = {
+    let (mut report, inventory) = {
         let mut step = |done: usize| ui::splash(&mut screen, done, "reading hardware");
         report::build(&info, &mut step)
     };
+    let mut recovered = false;
+    if let Some(bytes) = bringup::persist::take() {
+        report.head("last bring-up test");
+        for line in String::from_utf8_lossy(&bytes).lines() {
+            report.say(String::from(line));
+        }
+        recovered = true;
+    }
     let readiness = readiness::run(&inventory);
     let mut full = report.plain();
     full.push_str("\r\n");
     full.push_str(&readiness.plain());
     let mut note = store::save(&full);
+    if recovered {
+        note = format!("bring-up log recovered and {}", note);
+    }
     let mut selected = 0usize;
     loop {
         ui::menu(&mut screen, &ENTRIES, &subtitle, &note, selected);
@@ -65,8 +78,9 @@ fn main() -> Status {
                     ui::viewer(&mut screen, "READINESS CHECK", &readiness, &full);
                     note = String::new();
                 }
-                3 => runtime::reset(ResetType::COLD, Status::SUCCESS, None),
-                4 => runtime::reset(ResetType::SHUTDOWN, Status::SUCCESS, None),
+                2 => note = bringup::run(&mut screen),
+                4 => runtime::reset(ResetType::COLD, Status::SUCCESS, None),
+                5 => runtime::reset(ResetType::SHUTDOWN, Status::SUCCESS, None),
                 _ => note = String::from("macOS boot is not part of this build yet"),
             },
             _ => {}
