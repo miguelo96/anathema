@@ -128,6 +128,29 @@ pub enum Insn {
     MsrImm { field: u8, imm: u8 },
     Sys { l: bool, op1: u8, crn: u8, crm: u8, op2: u8, rt: u8 },
     Exc { kind: ExcKind, imm: u16 },
+    VLd { size: u8, rt: u8, rn: u8, addr: Addr },
+    VSt { size: u8, rt: u8, rn: u8, addr: Addr },
+    VLdp { sz: u8, rt: u8, rt2: u8, rn: u8, off: i64, mode: Mode },
+    VStp { sz: u8, rt: u8, rt2: u8, rn: u8, off: i64, mode: Mode },
+    Movi { q: bool, rd: u8, imm: u64 },
+    FmovI { ftype: u8, rd: u8, imm: u64 },
+    FmovR { ftype: u8, rd: u8, rn: u8 },
+    FmovToG { sf: bool, ftype: u8, top: bool, rd: u8, rn: u8 },
+    FmovFromG { sf: bool, ftype: u8, top: bool, rd: u8, rn: u8 },
+    Fp1 { ftype: u8, op: u8, rd: u8, rn: u8 },
+    Fp2 { ftype: u8, op: u8, rd: u8, rn: u8, rm: u8 },
+    Fp3 { ftype: u8, op: u8, rd: u8, rn: u8, rm: u8, ra: u8 },
+    Fcmp { ftype: u8, rn: u8, rm: u8, zero: bool, e: bool },
+    Fcsel { ftype: u8, rd: u8, rn: u8, rm: u8, cond: u8 },
+    Fcvt { from: u8, to: u8, rd: u8, rn: u8 },
+    CvtFI { sf: bool, ftype: u8, rd: u8, rn: u8, signed: bool },
+    CvtIF { sf: bool, ftype: u8, rd: u8, rn: u8, signed: bool },
+    VLog { op: u8, q: bool, rd: u8, rn: u8, rm: u8 },
+    VArith { sub: bool, size: u8, q: bool, rd: u8, rn: u8, rm: u8 },
+    VDupG { q: bool, size: u8, rd: u8, rn: u8 },
+    VDupE { q: bool, size: u8, idx: u8, rd: u8, rn: u8 },
+    Umov { sf: bool, size: u8, idx: u8, rd: u8, rn: u8 },
+    InsG { size: u8, idx: u8, rd: u8, rn: u8 },
     Unsup(&'static str),
 }
 
@@ -188,7 +211,7 @@ pub fn decode(w: u32) -> Insn {
         0b1010 | 0b1011 => branch(w),
         _ if op0 & 0b0101 == 0b0100 => ldst(w),
         _ if op0 & 0b0111 == 0b0101 => dp_reg(w),
-        _ if op0 & 0b0111 == 0b0111 => crate::decode::simd(w),
+        _ if op0 & 0b0111 == 0b0111 => simd(w),
         0 => {
             if w >> 16 == 0 {
                 Insn::Exc { kind: ExcKind::Udf, imm: w as u16 }
@@ -200,9 +223,8 @@ pub fn decode(w: u32) -> Insn {
     }
 }
 
-pub fn simd(_w: u32) -> Insn {
-    Insn::Unsup("simd")
-}
+mod simd;
+use simd::{simd, vldst};
 
 fn dp_imm(w: u32) -> Insn {
     let sf = w >> 31 != 0;
@@ -412,7 +434,7 @@ fn ldst(w: u32) -> Insn {
     let rn = bits(w, 9, 5);
     if w & 0x3b000000 == 0x18000000 {
         if v {
-            return Insn::Unsup("simd-ldst");
+            return vldst(w);
         }
         let off = sext(bits(w, 23, 5), 19) << 2;
         return match size {
@@ -483,7 +505,7 @@ fn ldst(w: u32) -> Insn {
     }
     if w & 0x3a000000 == 0x28000000 {
         if v {
-            return Insn::Unsup("simd-ldst");
+            return vldst(w);
         }
         let opc = size;
         let ty = bits(w, 24, 23);
@@ -520,7 +542,7 @@ fn ldst(w: u32) -> Insn {
     }
     if w & 0x3a000000 == 0x38000000 {
         if v {
-            return Insn::Unsup("simd-ldst");
+            return vldst(w);
         }
         let opc = bits(w, 23, 22);
         let rn8 = rsp(rn);
@@ -564,6 +586,9 @@ fn ldst(w: u32) -> Insn {
                 Insn::Ld { size: 3, sext: 0, rt: rt as u8, rn: rn8, addr: Addr::Imm { off: imm, mode } }
             }
         };
+    }
+    if w & 0xbe000000 == 0x0c000000 {
+        return Insn::Unsup("simd-ldst-struct");
     }
     Insn::Unsup("ldst")
 }
@@ -867,6 +892,41 @@ impl Insn {
         }
     }
 
+
+    pub fn vreg_uses(&self, f: &mut dyn FnMut(u8)) {
+        match *self {
+            Insn::VLd { rt, .. } | Insn::VSt { rt, .. } => f(rt),
+            Insn::VLdp { rt, rt2, .. } | Insn::VStp { rt, rt2, .. } => {
+                f(rt);
+                f(rt2)
+            }
+            Insn::Movi { rd, .. } | Insn::FmovI { rd, .. } | Insn::FmovFromG { rd, .. } | Insn::VDupG { rd, .. } | Insn::InsG { rd, .. } | Insn::CvtIF { rd, .. } => f(rd),
+            Insn::FmovToG { rn, .. } | Insn::Umov { rn, .. } | Insn::CvtFI { rn, .. } => f(rn),
+            Insn::FmovR { rd, rn, .. } | Insn::Fp1 { rd, rn, .. } | Insn::Fcvt { rd, rn, .. } | Insn::VDupE { rd, rn, .. } => {
+                f(rd);
+                f(rn)
+            }
+            Insn::Fp2 { rd, rn, rm, .. } | Insn::Fcsel { rd, rn, rm, .. } | Insn::VLog { rd, rn, rm, .. } | Insn::VArith { rd, rn, rm, .. } => {
+                f(rd);
+                f(rn);
+                f(rm)
+            }
+            Insn::Fp3 { rd, rn, rm, ra, .. } => {
+                f(rd);
+                f(rn);
+                f(rm);
+                f(ra)
+            }
+            Insn::Fcmp { rn, rm, zero, .. } => {
+                f(rn);
+                if !zero {
+                    f(rm)
+                }
+            }
+            _ => {}
+        }
+    }
+
     pub fn is_term(&self) -> bool {
         matches!(
             self,
@@ -938,6 +998,7 @@ impl Insn {
             Insn::Sys { .. } => "sys",
             Insn::Exc { .. } => "exc",
             Insn::Unsup(s) => s,
+            _ => "simd-fp",
         }
     }
 }

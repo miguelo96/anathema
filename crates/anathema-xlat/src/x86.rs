@@ -69,6 +69,7 @@ pub const CC_E: u8 = 4;
 pub const CC_NE: u8 = 5;
 pub const CC_BE: u8 = 6;
 pub const CC_A: u8 = 7;
+pub const CC_P: u8 = 10;
 pub const CC_S: u8 = 8;
 pub const CC_NS: u8 = 9;
 pub const CC_L: u8 = 12;
@@ -180,9 +181,14 @@ impl Asm {
             Rm::R(r) => (0, r),
             Rm::M(m) => (if m.index == NOIDX { 0 } else { m.index }, if m.base == NOIDX { 0 } else { m.base }),
         };
-        self.b(0xc4);
-        self.b((((!(reg >> 3)) & 1) << 7) | (((!(idx >> 3)) & 1) << 6) | (((!(base >> 3)) & 1) << 5) | map);
-        self.b(((w as u8) << 7) | (((!vvvv) & 0xf) << 3) | pp);
+        if map == 1 && !w && idx < 8 && base < 8 {
+            self.b(0xc5);
+            self.b((((!(reg >> 3)) & 1) << 7) | (((!vvvv) & 0xf) << 3) | pp);
+        } else {
+            self.b(0xc4);
+            self.b((((!(reg >> 3)) & 1) << 7) | (((!(idx >> 3)) & 1) << 6) | (((!(base >> 3)) & 1) << 5) | map);
+            self.b(((w as u8) << 7) | (((!vvvv) & 0xf) << 3) | pp);
+        }
         self.b(opc);
         self.modrm(reg, rm);
     }

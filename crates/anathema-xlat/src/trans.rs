@@ -13,7 +13,8 @@ pub const OFF_EXADDR: i32 = 280;
 pub const OFF_LIMIT: i32 = 288;
 pub const OFF_SYS: i32 = 296;
 pub const SYS_SLOTS: usize = 32;
-pub const CTX_SIZE: usize = 296 + 8 * SYS_SLOTS;
+pub const OFF_Q: i32 = 296 + 8 * SYS_SLOTS as i32;
+pub const CTX_SIZE: usize = OFF_Q as usize + 512;
 
 pub fn sysreg_id(op0: u32, op1: u32, crn: u32, crm: u32, op2: u32) -> u16 {
     ((((op0 & 1) << 14) | (op1 << 11) | (crn << 7) | (crm << 3) | op2) & 0x7fff) as u16
@@ -56,6 +57,7 @@ pub enum MemModel {
 #[derive(Clone, Debug)]
 pub struct Config {
     pub pins: [u8; 33],
+    pub vpins: [u8; 32],
     pub mem: MemModel,
     pub pc_base: u64,
     pub max_insns: usize,
@@ -64,6 +66,8 @@ pub struct Config {
 }
 
 pub const NOPIN: u8 = 0xff;
+pub const NVPIN: usize = 13;
+pub const DEFAULT_VORDER: [u8; NVPIN] = [0, 1, 2, 3, 4, 5, 6, 7, 16, 17, 18, 19, 20];
 
 pub const PIN_REGS: [u8; 11] = [RBX, RBP, RSI, RDI, RCX, R8, R9, R10, R12, R13, R14];
 
@@ -85,7 +89,22 @@ impl Config {
         for (g, h) in order.iter().zip(regs.iter()) {
             pins[*g as usize] = *h;
         }
-        Config { pins, mem, pc_base: 0, max_insns: 128, eflags_base: 0x202, indirect_flags_dead: true }
+        let mut vpins = [NOPIN; 32];
+        for (i, v) in DEFAULT_VORDER.iter().enumerate() {
+            vpins[*v as usize] = i as u8;
+        }
+        Config { pins, vpins, mem, pc_base: 0, max_insns: 128, eflags_base: 0x202, indirect_flags_dead: true }
+    }
+
+    pub fn set_vorder(&mut self, order: &[u8]) {
+        self.vpins = [NOPIN; 32];
+        for (i, v) in order.iter().take(NVPIN).enumerate() {
+            self.vpins[*v as usize] = i as u8;
+        }
+    }
+
+    pub fn vpinned(&self) -> Vec<(u8, u8)> {
+        (0..32u8).filter(|&v| self.vpins[v as usize] != NOPIN).map(|v| (v, self.vpins[v as usize])).collect()
     }
 
     pub fn pinned(&self) -> Vec<(u8, u8)> {
@@ -204,7 +223,8 @@ pub fn ctxm(off: i32) -> Mem {
 fn flag_rw(i: &Insn) -> (bool, bool) {
     match *i {
         Insn::Bcond { cond, .. } => (cond < 14, false),
-        Insn::Csel { cond, .. } => (cond < 14, false),
+        Insn::Csel { cond, .. } | Insn::Fcsel { cond, .. } => (cond < 14, false),
+        Insn::Fcmp { .. } => (false, true),
         Insn::Ccmp { cond, .. } => (cond < 14, true),
         Insn::AddSubC { set, .. } => (true, set),
         Insn::AddSubImm { set, .. } | Insn::AddSubSh { set, .. } | Insn::AddSubExt { set, .. } => (false, set),
@@ -225,6 +245,7 @@ fn is_interp(i: &Insn, cfg_sys: bool) -> bool {
         Insn::Mrs { id, .. } | Insn::Msr { id, .. } => sys_slot(id).is_none(),
         Insn::Hint { op } => matches!(op, 2 | 3 | 4 | 5),
         Insn::Crc { c, .. } => !c,
+        Insn::VDupE { .. } => true,
         Insn::Ldex { pair: true, .. } | Insn::Stex { pair: true, .. } => true,
         Insn::Casp { .. } => true,
         Insn::Atomic { op, size, rs, .. } => {
@@ -277,6 +298,8 @@ struct Tx<'a> {
     idx: usize,
     n_mem: usize,
     pc: u64,
+    zs: u32,
+    zd: u32,
 }
 
 pub fn translate(cfg: &Config, f: &dyn Fetch, start: u64) -> Trace {
@@ -364,6 +387,8 @@ pub fn translate(cfg: &Config, f: &dyn Fetch, start: u64) -> Trace {
         idx: 0,
         n_mem: 0,
         pc: 0,
+        zs: 0,
+        zd: 0,
     };
     let mut k = 0;
     let mut ended = false;
@@ -798,7 +823,7 @@ impl<'a> Tx<'a> {
                     }
                 }
             }
-            _ => {}
+            _ => self.vinsn(&i),
         }
         1
     }
@@ -1875,3 +1900,4 @@ impl<'a> Tx<'a> {
 }
 
 mod memops;
+mod vec;

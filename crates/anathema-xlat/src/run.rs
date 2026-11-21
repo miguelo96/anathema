@@ -12,11 +12,12 @@ pub struct Ctx {
     pub exaddr: u64,
     pub limit: u64,
     pub sys: [u64; SYS_SLOTS],
+    pub q: [[u8; 16]; 32],
 }
 
 impl Default for Ctx {
     fn default() -> Ctx {
-        Ctx { x: [0; 32], pc: 0, flags: 0, exval: 0, exaddr: u64::MAX, limit: 0, sys: [0; SYS_SLOTS] }
+        Ctx { x: [0; 32], pc: 0, flags: 0, exval: 0, exaddr: u64::MAX, limit: 0, sys: [0; SYS_SLOTS], q: [[0; 16]; 32] }
     }
 }
 
@@ -136,6 +137,7 @@ impl Runner {
 
     fn build_shared(&mut self) {
         let pins = self.cfg.pinned();
+        let vpins = self.cfg.vpinned();
         let mut a = Asm::new();
         for r in [RBX, RBP, R12, R13, R14, R15] {
             a.push_r(r);
@@ -145,6 +147,9 @@ impl Runner {
         for (g, h) in &pins {
             let idx = if *g == 32 { 31 } else { *g as i32 };
             a.op(0, true, &[0x8b], *h, Rm::M(Mem::b(R15, idx * 8 - 128)), false);
+        }
+        for (v, x) in &vpins {
+            a.vex(2, 1, false, 0, *x, Rm::M(Mem::b(R15, OFF_Q + *v as i32 * 16 - 128)), 0x6f);
         }
         if self.cfg.mem == MemModel::Biased {
             a.mov_ri(R14, 0);
@@ -161,6 +166,9 @@ impl Runner {
             for (g, h) in &pins {
                 let idx = if *g == 32 { 31 } else { *g as i32 };
                 a.store(3, Mem::b(R15, idx * 8 - 128), *h);
+            }
+            for (v, x) in &vpins {
+                a.vex(2, 1, false, 0, *x, Rm::M(Mem::b(R15, OFF_Q + *v as i32 * 16 - 128)), 0x7f);
             }
             a.mov_ri(RAX, status as u64);
             for r in [R15, R14, R13, R12, RBP, RBX] {

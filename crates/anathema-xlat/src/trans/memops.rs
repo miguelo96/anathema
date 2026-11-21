@@ -1,7 +1,7 @@
 use super::*;
 
 impl<'a> Tx<'a> {
-    fn finish_mem(&mut self, m: Mem) -> Mem {
+    pub(super) fn finish_mem(&mut self, m: Mem) -> Mem {
         match self.cfg.mem {
             MemModel::Identity => m,
             MemModel::Biased => {
@@ -13,6 +13,7 @@ impl<'a> Tx<'a> {
                 }
             }
             MemModel::Checked => {
+                self.clobber();
                 self.a.lea(true, T2, m);
                 self.a.alu_rm(Alu::Cmp, true, T2, ctxm(OFF_LIMIT));
                 let s = self.stub(self.pc, Shared::Interp, true);
@@ -23,7 +24,7 @@ impl<'a> Tx<'a> {
         }
     }
 
-    fn amem(&mut self, rn: u8, a: Addr) -> (Mem, Option<i64>) {
+    pub(super) fn amem(&mut self, rn: u8, a: Addr) -> (Mem, Option<i64>) {
         match a {
             Addr::Imm { off, mode } => {
                 let base = self.src(rn, T2);
@@ -53,9 +54,23 @@ impl<'a> Tx<'a> {
                             Mem::b(base, 0)
                         } else {
                             let s = self.src(rm, T1);
-                            Mem::bi(base, s, amt, 0)
+                            if amt > 3 {
+                                self.clobber();
+                                self.a.mov_rr(true, T1, s);
+                                self.a.shift_i(Shf::Shl, true, T1, amt);
+                                Mem::bi(base, T1, 0, 0)
+                            } else {
+                                Mem::bi(base, s, amt, 0)
+                            }
                         }
                     }
+                };
+                let m = if amt > 3 && matches!(ext, Ext::Uxtw | Ext::Sxtw) {
+                    self.clobber();
+                    self.a.shift_i(Shf::Shl, true, T1, amt);
+                    Mem::bi(base, T1, 0, 0)
+                } else {
+                    m
                 };
                 (self.finish_mem(m), None)
             }
@@ -67,7 +82,7 @@ impl<'a> Tx<'a> {
         }
     }
 
-    fn writeback(&mut self, rn: u8, off: i64) {
+    pub(super) fn writeback(&mut self, rn: u8, off: i64) {
         match self.pin(rn) {
             Some(h) => self.a.lea(true, h, Mem::b(h, off as i32)),
             None => {

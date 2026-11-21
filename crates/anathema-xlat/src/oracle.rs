@@ -10,7 +10,10 @@ pub const BASEREG: u64 = DATA + 0x8000;
 pub const WIN_ADDR: u64 = BASEREG - 512;
 pub const WIN_LEN: usize = 1024;
 pub const MAXW: usize = 24;
-pub const INSZ: usize = 264 + WIN_LEN + 4 * (MAXW + 1);
+pub const QOFF: usize = 272;
+pub const WOFF: usize = QOFF + 512;
+pub const COFF: usize = WOFF + WIN_LEN;
+pub const INSZ: usize = COFF + 4 * (MAXW + 1);
 pub const EPI: u64 = 0x1010_1000;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -18,6 +21,7 @@ pub struct State {
     pub x: [u64; 31],
     pub sp: u64,
     pub nzcv: u64,
+    pub q: [[u8; 16]; 32],
 }
 
 pub struct Rng(pub u64);
@@ -76,14 +80,14 @@ _start:
  cmp x21, x20
  b.lt 1b
  ldr x1, =WIN
- add x2, x19, #264
+ add x2, x19, #WOFFV
  mov x3, #128
 2: ldr x4, [x2], #8
  str x4, [x1], #8
  subs x3, x3, #1
  b.ne 2b
  ldr x1, =CODE
- add x2, x19, #1288
+ add x2, x19, #COFFV
  mov x3, #CODEW
 3: ldr w4, [x2], #4
  str w4, [x1], #4
@@ -99,6 +103,23 @@ _start:
  dsb ish
  isb
  mov x30, x19
+ msr fpcr, xzr
+ ldp q0, q1, [x30, #272]
+ ldp q2, q3, [x30, #304]
+ ldp q4, q5, [x30, #336]
+ ldp q6, q7, [x30, #368]
+ ldp q8, q9, [x30, #400]
+ ldp q10, q11, [x30, #432]
+ ldp q12, q13, [x30, #464]
+ ldp q14, q15, [x30, #496]
+ ldp q16, q17, [x30, #528]
+ ldp q18, q19, [x30, #560]
+ ldp q20, q21, [x30, #592]
+ ldp q22, q23, [x30, #624]
+ ldp q24, q25, [x30, #656]
+ ldp q26, q27, [x30, #688]
+ ldp q28, q29, [x30, #720]
+ ldp q30, q31, [x30, #752]
  ldr x0, [x30, #256]
  msr nzcv, x0
  ldr x0, [x30, #248]
@@ -150,9 +171,25 @@ epi:
  str x0, [x30, #248]
  mrs x0, nzcv
  str x0, [x30, #256]
+ stp q0, q1, [x30, #272]
+ stp q2, q3, [x30, #304]
+ stp q4, q5, [x30, #336]
+ stp q6, q7, [x30, #368]
+ stp q8, q9, [x30, #400]
+ stp q10, q11, [x30, #432]
+ stp q12, q13, [x30, #464]
+ stp q14, q15, [x30, #496]
+ stp q16, q17, [x30, #528]
+ stp q18, q19, [x30, #560]
+ stp q20, q21, [x30, #592]
+ stp q22, q23, [x30, #624]
+ stp q24, q25, [x30, #656]
+ stp q26, q27, [x30, #688]
+ stp q28, q29, [x30, #720]
+ stp q30, q31, [x30, #752]
  mov x0, #1
  mov x1, x30
- mov x2, #264
+ mov x2, #784
  mov x8, #64
  svc #0
  ldr x1, =WIN
@@ -195,7 +232,7 @@ fn build_elf(dir: &str) -> Result<String, String> {
     let l = format!("{}/t.ld", dir);
     let o = format!("{}/t.o", dir);
     let e = format!("{}/t.elf", dir);
-    let asm = ASM.replace("INSZ", &INSZ.to_string()).replace("CODEW", &(MAXW + 1).to_string());
+    let asm = ASM.replace("INSZ", &INSZ.to_string()).replace("WOFFV", &WOFF.to_string()).replace("COFFV", &COFF.to_string()).replace("CODEW", &(MAXW + 1).to_string());
     std::fs::write(&s, asm).map_err(|e| e.to_string())?;
     std::fs::write(&l, LDS).map_err(|e| e.to_string())?;
     let st = Command::new("aarch64-linux-gnu-as").args([&s, "-o", &o]).status().map_err(|e| e.to_string())?;
@@ -239,16 +276,19 @@ impl Oracle {
         }
         inb[248..256].copy_from_slice(&st.sp.to_le_bytes());
         inb[256..264].copy_from_slice(&st.nzcv.to_le_bytes());
-        inb[264..264 + WIN_LEN].copy_from_slice(win);
+        for i in 0..32 {
+            inb[QOFF + i * 16..QOFF + i * 16 + 16].copy_from_slice(&st.q[i]);
+        }
+        inb[WOFF..WOFF + WIN_LEN].copy_from_slice(win);
         let n = words.len();
-        let off = 264 + WIN_LEN;
+        let off = COFF;
         for (i, w) in words.iter().enumerate() {
             inb[off + i * 4..off + i * 4 + 4].copy_from_slice(&w.to_le_bytes());
         }
         let brw = encode_b(CODE + 4 * n as u64, EPI);
         inb[off + n * 4..off + n * 4 + 4].copy_from_slice(&brw.to_le_bytes());
         let r = self.stdin.write_all(&inb).and_then(|_| self.stdin.flush());
-        let mut out = vec![0u8; 264 + WIN_LEN];
+        let mut out = vec![0u8; 784 + WIN_LEN];
         let r = r.and_then(|_| self.stdout.read_exact(&mut out));
         if let Err(e) = r {
             let _ = self.child.kill();
@@ -259,13 +299,16 @@ impl Oracle {
             self.stdout = o;
             return Err(format!("oracle died: {}", e));
         }
-        let mut s = State { x: [0; 31], sp: 0, nzcv: 0 };
+        let mut s = State { x: [0; 31], sp: 0, nzcv: 0, q: [[0; 16]; 32] };
         for i in 0..31 {
             s.x[i] = u64::from_le_bytes(out[i * 8..i * 8 + 8].try_into().unwrap());
         }
+        for i in 0..32 {
+            s.q[i].copy_from_slice(&out[QOFF + i * 16..QOFF + i * 16 + 16]);
+        }
         s.sp = u64::from_le_bytes(out[248..256].try_into().unwrap());
         s.nzcv = u64::from_le_bytes(out[256..264].try_into().unwrap()) & 0xf000_0000;
-        Ok((s, out[264..].to_vec()))
+        Ok((s, out[784..].to_vec()))
     }
 }
 
@@ -309,13 +352,14 @@ impl Native {
         for i in 0..31 {
             ctx.x[i] = st.x[i];
         }
+        ctx.q = st.q;
         ctx.x[31] = st.sp;
         ctx.pc = CODE;
         ctx.flags = nzcv_to_flags(st.nzcv, self.runner.cfg.eflags_base as u64);
         let w = Words { base: CODE, words };
         let end = CODE + 4 * words.len() as u64;
         self.runner.run(&mut ctx, &w, end, 100)?;
-        let mut s = State { x: [0; 31], sp: ctx.x[31], nzcv: flags_to_nzcv(ctx.flags) };
+        let mut s = State { x: [0; 31], sp: ctx.x[31], nzcv: flags_to_nzcv(ctx.flags), q: ctx.q };
         s.x.copy_from_slice(&ctx.x[..31]);
         let mut win_out = vec![0u8; WIN_LEN];
         unsafe {
@@ -356,6 +400,26 @@ const PATS: &[(u32, u32, u32)] = &[
     (0x3400_0000, 0x7e00_0000, 2),
     (0x3600_0000, 0x7e00_0000, 2),
     (0x1400_0000, 0xfc00_0000, 1),
+    (0x3d00_0000, 0x3f00_0000, 6),
+    (0x3c00_0000, 0x3f20_0c00, 3),
+    (0x3c00_0c00, 0x3f20_0c00, 2),
+    (0x3c00_0400, 0x3f20_0c00, 2),
+    (0x3c20_0800, 0x3f20_0c00, 3),
+    (0x2c00_0000, 0x3e00_0000, 5),
+    (0x1c00_0000, 0x3f00_0000, 1),
+    (0x1e20_0800, 0xff20_0c00, 8),
+    (0x1e20_4000, 0xff20_7c00, 4),
+    (0x1e20_2000, 0xff20_fc07, 3),
+    (0x1e20_0c00, 0xff20_0c00, 2),
+    (0x1e20_1000, 0xff20_1fe0, 1),
+    (0x1f00_0000, 0xff00_0000, 3),
+    (0x1e20_0000, 0x7f20_fc00, 6),
+    (0x0e20_1c00, 0x9f20_fc00, 5),
+    (0x0e20_8400, 0x9f20_fc00, 3),
+    (0x0f00_0400, 0x9ff8_0c00, 3),
+    (0x0e00_0c00, 0xbfe0_fc00, 2),
+    (0x0e00_3c00, 0xbfe0_fc00, 2),
+    (0x4e00_1c00, 0xffe0_fc00, 2),
 ];
 
 fn dests(i: &Insn) -> Vec<u8> {
@@ -403,6 +467,18 @@ fn mem_fix(w: u32, i: &Insn) -> Option<u32> {
                 w = (w & !(0x1f << 16)) | (27 << 16);
             }
         }
+        Insn::VLd { addr: Addr::Lit { .. }, .. } => {
+            return Some(w);
+        }
+        Insn::VLd { addr, .. } | Insn::VSt { addr, .. } => {
+            w = (w & !(0x1f << 5)) | (28 << 5);
+            if let Addr::Reg { .. } = addr {
+                w = (w & !(0x1f << 16)) | (27 << 16);
+            }
+        }
+        Insn::VLdp { .. } | Insn::VStp { .. } => {
+            w = (w & !(0x1f << 5)) | (28 << 5);
+        }
         Insn::Ldp { .. } | Insn::Stp { .. } | Insn::Ldex { .. } | Insn::Stex { .. } | Insn::Ldar { .. } | Insn::Stlr { .. } | Insn::Atomic { .. } | Insn::Cas { .. } => {
             w = (w & !(0x1f << 5)) | (28 << 5);
         }
@@ -414,7 +490,8 @@ fn mem_fix(w: u32, i: &Insn) -> Option<u32> {
 fn off_ok(i: &Insn) -> bool {
     match *i {
         Insn::Ld { addr: Addr::Imm { off, .. }, .. } | Insn::St { addr: Addr::Imm { off, .. }, .. } => off.abs() <= 400,
-        Insn::Ldp { off, .. } | Insn::Stp { off, .. } => off.abs() <= 400,
+        Insn::Ldp { off, .. } | Insn::Stp { off, .. } | Insn::VLdp { off, .. } | Insn::VStp { off, .. } => off.abs() <= 400,
+        Insn::VLd { addr: Addr::Imm { off, .. }, .. } | Insn::VSt { addr: Addr::Imm { off, .. }, .. } => off.abs() <= 400,
         _ => true,
     }
 }
@@ -437,7 +514,14 @@ pub fn gen_program(rng: &mut Rng, n: usize) -> Vec<u32> {
         let idx = out.len();
         let remain = (n - idx) as u32;
         let ahead = 1 + rng.below(remain.min(5) as u64) as u32;
-        if pat.0 == 0x5400_0000 || pat.0 == 0x3400_0000 {
+        if pat.0 == 0x1c00_0000 {
+            if n < 6 {
+                continue;
+            }
+            let tgt = rng.below(n as u64 - 5) as i32;
+            let o = (tgt - idx as i32) as u32 & 0x7ffff;
+            w = (w & !(0x7ffff << 5)) | (o << 5);
+        } else if pat.0 == 0x5400_0000 || pat.0 == 0x3400_0000 {
             w = (w & !(0x7ffff << 5)) | (ahead << 5);
         } else if pat.0 == 0x3600_0000 {
             w = (w & !(0x3fff << 5)) | (ahead << 5);
@@ -504,7 +588,30 @@ pub fn gen_program(rng: &mut Rng, n: usize) -> Vec<u32> {
 }
 
 pub fn gen_state(rng: &mut Rng) -> (State, Vec<u8>) {
-    let mut st = State { x: [0; 31], sp: rng.val(), nzcv: (rng.below(16)) << 28 };
+    let mut st = State { x: [0; 31], sp: rng.val(), nzcv: (rng.below(16)) << 28, q: [[0; 16]; 32] };
+    for i in 0..32 {
+        for h in 0..2 {
+            let mut v: u64 = match rng.below(6) {
+                0 => 0,
+                1 => (1.0f64).to_bits(),
+                2 => ((rng.below(2000) as f64 - 1000.0) / 7.0).to_bits(),
+                3 => (rng.below(1 << 20) as f64 * 1.5e-3).to_bits() ^ (rng.below(2) << 63),
+                4 => (f64::from_bits(rng.next()).clamp(-1e30, 1e30)).to_bits(),
+                _ => rng.next(),
+            };
+            if (v >> 52) & 0x7ff == 0x7ff {
+                v &= !(1 << 62);
+            }
+            let mut words = [v as u32, (v >> 32) as u32];
+            for w in words.iter_mut() {
+                if (*w >> 23) & 0xff == 0xff {
+                    *w &= !(1 << 30);
+                }
+            }
+            let v = words[0] as u64 | (words[1] as u64) << 32;
+            st.q[i][h * 8..h * 8 + 8].copy_from_slice(&v.to_le_bytes());
+        }
+    }
     for i in 0..31 {
         st.x[i] = rng.val();
     }
@@ -530,6 +637,25 @@ pub fn diff(a: &State, wa: &[u8], b: &State, wb: &[u8]) -> Option<String> {
     }
     if a.nzcv != b.nzcv {
         s += &format!("nzcv: oracle {:#x} native {:#x}\n", a.nzcv >> 28, b.nzcv >> 28);
+    }
+    for i in 0..32 {
+        if a.q[i] != b.q[i] {
+            let mut bad = false;
+            for h in 0..2 {
+                let la = u64::from_le_bytes(a.q[i][h * 8..h * 8 + 8].try_into().unwrap());
+                let lb = u64::from_le_bytes(b.q[i][h * 8..h * 8 + 8].try_into().unwrap());
+                if la != lb {
+                    let nan64 = (la >> 52) & 0x7ff == 0x7ff && la << 12 != 0;
+                    let nan32 = |w: u32| (w >> 23) & 0xff == 0xff && w << 9 != 0;
+                    if !(nan64 || nan32(la as u32) || nan32((la >> 32) as u32)) {
+                        bad = true;
+                    }
+                }
+            }
+            if bad {
+                s += &format!("v{}: oracle {:x?} native {:x?}\n", i, a.q[i], b.q[i]);
+            }
+        }
     }
     if wa != wb {
         let k = wa.iter().zip(wb.iter()).position(|(x, y)| x != y).unwrap();

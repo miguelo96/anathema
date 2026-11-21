@@ -208,6 +208,7 @@ fn main() {
     let mut base: u64 = 0xfffffe0008ae8000;
     let mut stela = format!("{}/anathema-work/s.jsonl", std::env::var("HOME").unwrap());
     let mut sizes = true;
+    let mut dump: Option<String> = None;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -224,6 +225,10 @@ fn main() {
                 i += 1;
             }
             "--nosizes" => sizes = false,
+            "--dump-refused" => {
+                dump = Some(args[i + 1].clone());
+                i += 1;
+            }
             _ => {}
         }
         i += 1;
@@ -233,20 +238,36 @@ fn main() {
     let n = data.len() / 4;
     println!("input {} bytes, {} insns, base {:#x}", data.len(), n, base);
     let mut uses = [0u64; 33];
+    let mut vuses = [0u64; 32];
     let mut classes: HashMap<String, u64> = HashMap::new();
     for k in 0..n {
         let w = u32::from_le_bytes(data[k * 4..k * 4 + 4].try_into().unwrap());
         let i = decode(w);
         i.reg_uses(&mut |r| uses[r as usize] += 1);
+        i.vreg_uses(&mut |r| vuses[r as usize] += 1);
         *classes.entry(i.name().to_string()).or_insert(0) += 1;
+    }
+    if let Some(p) = &dump {
+        let mut out = Vec::new();
+        for k in 0..n {
+            let w = u32::from_le_bytes(data[k * 4..k * 4 + 4].try_into().unwrap());
+            if let Insn::Unsup(_) = decode(w) {
+                out.extend_from_slice(&w.to_le_bytes());
+            }
+        }
+        std::fs::write(p, out).unwrap();
     }
     let mut order: Vec<u8> = (0..33u8).filter(|&g| g != 31).collect();
     order.sort_by(|a, b| uses[*b as usize].cmp(&uses[*a as usize]));
     println!("guest reg static uses, top: {:?}", order.iter().take(12).map(|&g| (g, uses[g as usize])).collect::<Vec<_>>());
+    let mut vorder: Vec<u8> = (0..32u8).collect();
+    vorder.sort_by(|a, b| vuses[*b as usize].cmp(&vuses[*a as usize]));
+    println!("guest vreg static uses, top: {:?}", vorder.iter().take(14).map(|&g| (g, vuses[g as usize])).collect::<Vec<_>>());
     println!("decode classes:");
     top(&classes, 14, n as u64);
     for (name, model) in [("identity", MemModel::Identity), ("biased", MemModel::Biased), ("checked", MemModel::Checked)] {
         let mut cfg = Config::with_order(model, &order);
+        cfg.set_vorder(&vorder);
         cfg.pc_base = base;
         let st = sweep(&cfg, &img, sizes);
         report(name, &st);

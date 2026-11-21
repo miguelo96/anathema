@@ -1,4 +1,3 @@
-use anathema_xlat::decode::*;
 use anathema_xlat::oracle::*;
 use anathema_xlat::trans::MemModel;
 use std::process::Command;
@@ -16,7 +15,7 @@ fn dis(words: &[u32]) -> String {
 }
 
 fn fuzz(model: MemModel, seed: u64, cases: usize, len: usize) {
-    let mut oracle = Oracle::new("/tmp/anx-oracle").expect("oracle");
+    let mut oracle = Oracle::new(&format!("/tmp/anx-oracle-{}", seed)).expect("oracle");
     let mut native = Native::new(model);
     let mut rng = Rng(seed);
     let mut fails = 0;
@@ -66,4 +65,15 @@ fn identity_long() {
 #[test]
 fn biased() {
     fuzz(MemModel::Biased, 0x77, 500, 8);
+}
+
+#[test]
+fn checked() {
+    fuzz(MemModel::Checked, 0x4242, 500, 8);
+}
+
+#[test]
+#[ignore]
+fn big() {
+    fuzz(MemModel::Identity, 0xfeed_f00d_1, 40000, 20);
 }

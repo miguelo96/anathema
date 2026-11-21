@@ -5,6 +5,7 @@ members = [
     "crates/anathema-media",
     "crates/anathema-setup",
     "crates/anathema-xlat",
+    "crates/anathema-xlat",
 ]
 
 [profile.release]
