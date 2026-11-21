@@ -806,8 +806,9 @@ impl<'a> Tx<'a> {
                 self.fixes.push(Fix::Shared { cold: false, at, id: Shared::Indirect });
             }
             Insn::Blr { rn } => {
-                self.load_g(RAX, rn);
+                self.load_g(T1, rn);
                 self.mov_imm(30, pc.wrapping_add(4), true);
+                self.a.mov_rr(true, RAX, T1);
                 let at = self.a.jmp32() as u32;
                 self.fixes.push(Fix::Shared { cold: false, at, id: Shared::Indirect });
             }

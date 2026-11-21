@@ -78,13 +78,15 @@ pub fn load_kernel(ram: &Ram, img: &Image, data: &[u8], dt_bytes: &[u8], cmdline
         b.push(0);
         chosen.set("boot-args", b);
         chosen.set("kaslr-seed", vec![0u8; 8]);
+        chosen.set("dram-base", RAM_BASE.to_le_bytes().to_vec());
+        chosen.set("dram-size", RAM_SIZE.to_le_bytes().to_vec());
     }
     let dt_final = dt::serialize(&root);
     let dt_pa = align(KERNEL_PA + span, 0x4000);
     ram.bytes(dt_pa, dt_final.len()).copy_from_slice(&dt_final);
     let args_pa = align(dt_pa + dt_final.len() as u64, 0x4000);
     let top = align(args_pa + 0x4000, 0x4000);
-    let args = ram.bytes(args_pa, 0x400);
+    let args = ram.bytes(args_pa, 0x800);
     args.fill(0);
     let put16 = |a: &mut [u8], o: usize, v: u16| a[o..o + 2].copy_from_slice(&v.to_le_bytes());
     let put32 = |a: &mut [u8], o: usize, v: u32| a[o..o + 4].copy_from_slice(&v.to_le_bytes());
@@ -99,9 +101,9 @@ pub fn load_kernel(ram: &Ram, img: &Image, data: &[u8], dt_bytes: &[u8], cmdline
     put64(args, 0x60, virt_base + (dt_pa - KERNEL_PA));
     put32(args, 0x68, dt_final.len() as u32);
     let cl = cmdline.as_bytes();
-    args[0x70..0x70 + cl.len().min(607)].copy_from_slice(&cl[..cl.len().min(607)]);
-    put64(args, 0x2d0, 0);
-    put64(args, 0x2d8, RAM_SIZE);
+    args[0x70..0x70 + cl.len().min(1023)].copy_from_slice(&cl[..cl.len().min(1023)]);
+    put64(args, 0x470, 0);
+    put64(args, 0x478, RAM_SIZE);
     println!("devicetree at {:#x} ({} bytes), boot args at {:#x}, top of kernel data {:#x}", dt_pa, dt_final.len(), args_pa, top);
     Loaded { entry_pa: KERNEL_PA + (img.entry - virt_base), args_pa, virt_base }
 }

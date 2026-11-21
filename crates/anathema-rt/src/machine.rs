@@ -17,6 +17,9 @@ pub struct Machine {
     pub trace_budget: usize,
     pub flush: bool,
     pub elog: bool,
+    pub watch: u64,
+    pub hit: bool,
+    pub cur_pc: u64,
     pub from: usize,
     pub daif: u64,
     tlb: HashMap<u64, u64>,
@@ -96,6 +99,9 @@ impl Machine {
             trace_budget: 400,
             flush: false,
             elog: std::env::var("RT_ELOG").is_ok(),
+            watch: std::env::var("RT_WATCH").ok().and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok()).unwrap_or(0),
+            cur_pc: 0,
+            hit: false,
             from: std::env::var("RT_FROM").ok().and_then(|v| v.parse().ok()).unwrap_or(usize::MAX),
             daif: 0x3c0,
             tlb: HashMap::new(),
@@ -139,6 +145,10 @@ impl Machine {
     }
 
     pub fn store(&mut self, va: u64, size: usize, v: u64) -> Result<(), String> {
+        if self.watch != 0 && va <= self.watch && va + size as u64 > self.watch {
+            self.hit = true;
+            println!("WATCH write {:#x} size {} value {:#x} at pc {:#x} (event {})", va, size, v, self.cur_pc, self.events);
+        }
         let pa = self.translate(va)?;
         if self.ram.contains(pa, size as u64) {
             self.ram.write(pa, size, v);
@@ -230,6 +240,7 @@ impl Machine {
             None => return Step::Stop(format!("instruction fetch failed at {:#x}", pc)),
         };
         self.events += 1;
+        self.cur_pc = pc;
         let insn = decode(w);
         if self.elog {
             let mut fp = 0u64;
@@ -239,6 +250,10 @@ impl Machine {
             println!("E {} {:x} {:08x} {:016x} f{:x}", self.events, pc, w, fp, ctx.flags & 0x8c1);
         }
         let r = self.exec(ctx, pc, w, insn);
+        if self.hit {
+            self.hit = false;
+            println!("  regs x1 {:#x} x2 {:#x} x3 {:#x} x14 {:#x} x15 {:#x} x29 {:#x}", ctx.x[1], ctx.x[2], ctx.x[3], ctx.x[14], ctx.x[15], ctx.x[29]);
+        }
         if self.flush {
             self.flush = false;
             *runner_flush = true;

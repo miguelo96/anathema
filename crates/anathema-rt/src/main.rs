@@ -83,7 +83,8 @@ fn main() {
     let mut blocks = 0u64;
     let mut last = (u64::MAX, 0usize);
     let limit: u64 = std::env::var("RT_BLOCKS").ok().and_then(|s| s.parse().ok()).unwrap_or(400_000_000);
-    let ring_on = std::env::var("RT_RING").is_ok();
+    let bps: Option<Vec<u64>> = std::env::var("RT_BP").ok().map(|v| v.split(',').filter_map(|a| u64::from_str_radix(a.trim_start_matches("0x"), 16).ok()).collect());
+    let ring_on = std::env::var("RT_RING").is_ok() || bps.is_some();
     let trace_on = ring_on || std::env::var("RT_TRACE").is_ok();
     let mut ring: VecDeque<u64> = VecDeque::new();
     let reason = loop {
@@ -96,9 +97,24 @@ fn main() {
             }
             Runner::new(cfg)
         });
+        if let Some(bp) = &bps {
+            if bp.contains(&ctx.pc) {
+                print!("BP {:#x}:", ctx.pc);
+                for r in 0..31 {
+                    print!(" x{}={:#x}", r, ctx.x[r]);
+                }
+                println!(" sp={:#x}", ctx.x[31]);
+                if std::env::var("RT_BPRING").is_ok() {
+                    for p in ring.iter().rev().take(60).collect::<Vec<_>>().into_iter().rev() {
+                        print!("{:x} ", p & 0xfffffff);
+                    }
+                    println!();
+                }
+            }
+        }
         if trace_on {
             ring.push_back(ctx.pc);
-            if ring.len() > 48 {
+            if ring.len() > 400 {
                 ring.pop_front();
             }
         }
@@ -160,6 +176,39 @@ fn main() {
         }
     }
     println!("sp  {:016x}", ctx.x[31]);
+    {
+        let mut fp = ctx.x[29];
+        println!("backtrace:");
+        for _ in 0..14 {
+            let lr = match m.load(fp + 8, 8) { Ok(v) => v, Err(_) => break };
+            println!("  lr {:#x}", lr);
+            if std::env::var("RT_FRAMES").is_ok() {
+                let mut line = String::new();
+                for i in 0..14u64 {
+                    line.push_str(&format!("{:#x} ", m.load(fp.wrapping_sub(std::env::var("RT_BELOW").ok().and_then(|v| u64::from_str_radix(&v, 16).ok()).unwrap_or(0x70)) + i * 8, 8).unwrap_or(0)));
+                }
+                println!("    below fp: {}", line);
+            }
+            fp = match m.load(fp, 8) { Ok(v) => v, Err(_) => break };
+            if fp == 0 { break }
+        }
+    }
+    {
+        println!("stack:");
+        let mut a = ctx.x[31];
+        for _ in 0..48 {
+            let v = m.load(a, 8).unwrap_or(0);
+            println!("  {:#x}: {:#x}", a, v);
+            a += 8;
+        }
+    }
+    if let Ok(list) = std::env::var("RT_PEEK") {
+        for a in list.split(',') {
+            if let Ok(va) = u64::from_str_radix(a.trim_start_matches("0x"), 16) {
+                println!("peek {:#x} = {:?}", va, m.load(va, 8));
+            }
+        }
+    }
     println!("sctlr {:#x} tcr {:#x} ttbr0 {:#x} ttbr1 {:#x}", m.mmu.sctlr, m.mmu.tcr, m.mmu.ttbr0, m.mmu.ttbr1);
     match m.translate(ctx.pc) {
         Ok(pa) => {
