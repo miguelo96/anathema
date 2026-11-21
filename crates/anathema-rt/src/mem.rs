@@ -49,7 +49,11 @@ impl Ram {
     }
 }
 
+pub const FB_BASE: u64 = 0x6000_0000;
+pub const FB_BYTES: usize = 1920 * 1080 * 4;
+
 pub struct Bus {
+    pub fb: Vec<u8>,
     pub uart: String,
     regs: HashMap<u64, u64>,
     pub log_budget: usize,
@@ -58,7 +62,7 @@ pub struct Bus {
 
 impl Bus {
     pub fn new() -> Bus {
-        Bus { uart: String::new(), regs: HashMap::new(), log_budget: 300, seen: HashMap::new() }
+        Bus { fb: vec![0u8; FB_BYTES], uart: String::new(), regs: HashMap::new(), log_budget: 300, seen: HashMap::new() }
     }
 
     fn note(&mut self, kind: &str, pa: u64, size: usize, v: u64) {
@@ -72,6 +76,12 @@ impl Bus {
     }
 
     pub fn read(&mut self, pa: u64, size: usize) -> u64 {
+        if pa >= FB_BASE && pa + size as u64 <= FB_BASE + FB_BYTES as u64 {
+            let o = (pa - FB_BASE) as usize;
+            let mut b = [0u8; 8];
+            b[..size].copy_from_slice(&self.fb[o..o + size]);
+            return u64::from_le_bytes(b);
+        }
         let v = match pa {
             0x2001_0018 => 0x90,
             0x2001_0fe0 => 0x11,
@@ -89,6 +99,11 @@ impl Bus {
     }
 
     pub fn write(&mut self, pa: u64, size: usize, v: u64) {
+        if pa >= FB_BASE && pa + size as u64 <= FB_BASE + FB_BYTES as u64 {
+            let o = (pa - FB_BASE) as usize;
+            self.fb[o..o + size].copy_from_slice(&v.to_le_bytes()[..size]);
+            return;
+        }
         if pa == 0x2001_0000 {
             let c = (v & 0xff) as u8 as char;
             self.uart.push(c);

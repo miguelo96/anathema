@@ -18,6 +18,16 @@ pub struct Machine {
     pub flush: bool,
     pub elog: bool,
     pub watch: u64,
+    pub watch_pa: u64,
+    pub watch_len: u64,
+    pub watch_hits: u64,
+    pub last_write: bool,
+    pub pan: u64,
+    pub spsel: u64,
+    pub sp_el1: u64,
+    pub say_exc: bool,
+    pub exc_count: u64,
+    pub last_exc: (u64, u64, u64),
     pub hit: bool,
     pub cur_pc: u64,
     pub from: usize,
@@ -88,6 +98,7 @@ impl Machine {
         sys.insert(sysreg_id(3, 0, 0, 0, 0), 0x612f_0000);
         sys.insert(sysreg_id(3, 0, 0, 0, 5), 0x8000_0000);
         sys.insert(sysreg_id(3, 3, 14, 0, 0), 24_000_000);
+        sys.insert(sysreg_id(3, 3, 0, 0, 7), 4);
         Machine {
             ram,
             bus: Bus::new(),
@@ -99,6 +110,16 @@ impl Machine {
             trace_budget: 400,
             flush: false,
             elog: std::env::var("RT_ELOG").is_ok(),
+            last_write: false,
+            pan: 0,
+            spsel: 1,
+            sp_el1: 0,
+            say_exc: std::env::var("RT_EXC").is_ok(),
+            exc_count: 0,
+            last_exc: (0, 0, 0),
+            watch_len: std::env::var("RT_WATCHLEN").ok().and_then(|v| v.parse().ok()).unwrap_or(1),
+            watch_hits: 0,
+            watch_pa: std::env::var("RT_WATCHPA").ok().and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok()).unwrap_or(0),
             watch: std::env::var("RT_WATCH").ok().and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok()).unwrap_or(0),
             cur_pc: 0,
             hit: false,
@@ -131,6 +152,7 @@ impl Machine {
     }
 
     pub fn load(&mut self, va: u64, size: usize) -> Result<u64, String> {
+        self.last_write = false;
         if size == 16 {
             return Err("wide load".into());
         }
@@ -145,11 +167,18 @@ impl Machine {
     }
 
     pub fn store(&mut self, va: u64, size: usize, v: u64) -> Result<(), String> {
+        self.last_write = true;
         if self.watch != 0 && va <= self.watch && va + size as u64 > self.watch {
             self.hit = true;
             println!("WATCH write {:#x} size {} value {:#x} at pc {:#x} (event {})", va, size, v, self.cur_pc, self.events);
         }
         let pa = self.translate(va)?;
+        if self.watch_pa != 0 && pa + size as u64 > self.watch_pa && pa < self.watch_pa + self.watch_len {
+            self.watch_hits += 1;
+            if self.watch_hits <= 12 {
+                println!("WATCHPA write pa {:#x} va {:#x} size {} value {:#x} at pc {:#x} (event {})", pa, va, size, v, self.cur_pc, self.events);
+            }
+        }
         if self.ram.contains(pa, size as u64) {
             self.ram.write(pa, size, v);
             Ok(())
@@ -249,10 +278,49 @@ impl Machine {
             }
             println!("E {} {:x} {:08x} {:016x} f{:x}", self.events, pc, w, fp, ctx.flags & 0x8c1);
         }
-        let r = self.exec(ctx, pc, w, insn);
+        let mut r = self.exec(ctx, pc, w, insn);
+        if let Step::Stop(m) = &r {
+            if let Some(rest) = m.strip_prefix("translation fault at ") {
+                let va = rest.split_whitespace().next().and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok()).unwrap_or(0);
+                let level = rest.split("(level ").nth(1).and_then(|v| v.split(')').next()).and_then(|v| v.parse::<u64>().ok()).unwrap_or(3);
+                if self.last_exc == (pc, va, self.exc_count.wrapping_sub(1)) {
+                    // same fault repeated right after delivery
+                }
+                self.exc_count += 1;
+                if self.exc_count > 5_000_000 {
+                    return r;
+                }
+                let voff = if self.spsel == 0 { 0u64 } else { 0x200 };
+                let pan_bit = self.pan << 22;
+                if self.mmu.sctlr & (1 << 23) == 0 {
+                    self.pan = 1;
+                }
+                let spsr = (anathema_xlat::run::flags_to_nzcv(ctx.flags) & 0xf000_0000) | self.daif | pan_bit | if self.spsel == 0 { 4 } else { 5 };
+                if self.spsel == 0 {
+                    ctx.sys[3] = ctx.x[31];
+                    ctx.x[31] = self.sp_el1;
+                    self.spsel = 1;
+                }
+                let esr = (0x25u64 << 26) | (1 << 25) | ((self.last_write as u64) << 6) | (4 + level);
+                ctx.sys[7] = esr;
+                ctx.sys[6] = va;
+                ctx.sys[4] = pc;
+                ctx.sys[5] = spsr;
+                self.daif = 0x3c0;
+                ctx.pc = ctx.sys[8] + voff;
+                if self.say_exc {
+                    println!("exc #{} data abort va {:#x} level {} write {} at pc {:#x} -> vbar+0x200 {:#x}", self.exc_count, va, level, self.last_write, pc, ctx.pc);
+                    if std::env::var("RT_EXCREGS").is_ok() {
+                        println!("   x0 {:#x} x1 {:#x} x8 {:#x} x9 {:#x} x12 {:#x} x13 {:#x} x16 {:#x} x19 {:#x} x20 {:#x} x21 {:#x} x22 {:#x} x26 {:#x} x27 {:#x} x28 {:#x}", ctx.x[0], ctx.x[1], ctx.x[8], ctx.x[9], ctx.x[12], ctx.x[13], ctx.x[16], ctx.x[19], ctx.x[20], ctx.x[21], ctx.x[22], ctx.x[26], ctx.x[27], ctx.x[28]);
+                    }
+                }
+                self.last_exc = (pc, va, self.exc_count);
+                r = Step::Next;
+            }
+        }
         if self.hit {
             self.hit = false;
-            println!("  regs x1 {:#x} x2 {:#x} x3 {:#x} x14 {:#x} x15 {:#x} x29 {:#x}", ctx.x[1], ctx.x[2], ctx.x[3], ctx.x[14], ctx.x[15], ctx.x[29]);
+            println!("  regs x0 {:#x} x1 {:#x} x2 {:#x} x3 {:#x} x29 {:#x} x30 {:#x} sp {:#x}", ctx.x[0], ctx.x[1], ctx.x[2], ctx.x[3], ctx.x[29], ctx.x[30], ctx.x[31]);
         }
         if self.flush {
             self.flush = false;
@@ -384,6 +452,42 @@ impl Machine {
                 }
                 wr(ctx, rs, old);
             }
+            Insn::VDupE { q, size, idx, rd: vd, rn: vn } => {
+                let e = 1usize << size;
+                let src = ctx.q[vn as usize];
+                let mut o = [0u8; 16];
+                let total = if q { 16 } else { 8 };
+                let base = idx as usize * e;
+                for i in 0..total / e {
+                    o[i * e..(i + 1) * e].copy_from_slice(&src[base..base + e]);
+                }
+                ctx.q[vd as usize] = o;
+            }
+            Insn::Crc { c, sz, rd: d, rn, rm } => {
+                let poly: u32 = if c { 0x82f6_3b78 } else { 0xedb8_8320 };
+                let mut crc = rd(ctx, rn) as u32;
+                let data = rd(ctx, rm);
+                let nbytes = 1usize << sz;
+                for i in 0..nbytes {
+                    crc ^= ((data >> (8 * i)) & 0xff) as u32;
+                    for _ in 0..8 {
+                        crc = if crc & 1 != 0 { (crc >> 1) ^ poly } else { crc >> 1 };
+                    }
+                }
+                wr(ctx, d, crc as u64);
+            }
+            Insn::Casp { size, rs, rt, rn } => {
+                let ea = rd(ctx, rn);
+                let n = 1usize << size;
+                let o0 = tryv!(self.load(ea, n));
+                let o1 = tryv!(self.load(ea + n as u64, n));
+                if o0 == rd(ctx, rs) & mask(n) && o1 == rd(ctx, rs + 1) & mask(n) {
+                    tryv!(self.store(ea, n, rd(ctx, rt) & mask(n)));
+                    tryv!(self.store(ea + n as u64, n, rd(ctx, rt + 1) & mask(n)));
+                }
+                wr(ctx, rs, o0);
+                wr(ctx, rs + 1, o1);
+            }
             Insn::VLd { size, rt, rn, addr } => {
                 let (ea, wb) = self.ea(ctx, pc, rn, &addr);
                 tryv!(self.qload(ctx, rt, ea, 1usize << size));
@@ -435,7 +539,21 @@ impl Machine {
                 }
             }
             Insn::MsrImm { field, imm } => {
-                if field == 30 {
+                if field == 4 {
+                    self.pan = imm as u64 & 1;
+                } else if field == 5 {
+                    let v = imm as u64 & 1;
+                    if v != self.spsel {
+                        if v == 0 {
+                            self.sp_el1 = ctx.x[31];
+                            ctx.x[31] = ctx.sys[3];
+                        } else {
+                            ctx.sys[3] = ctx.x[31];
+                            ctx.x[31] = self.sp_el1;
+                        }
+                        self.spsel = v;
+                    }
+                } else if field == 30 {
                     self.daif |= (imm as u64 & 0xf) << 6;
                 } else if field == 31 {
                     self.daif &= !((imm as u64 & 0xf) << 6);
@@ -449,6 +567,23 @@ impl Machine {
                 self.count(format!("sys {} {} c{} c{} {}", if l { "sysl" } else { "sys" }, op1, crn, crm, op2));
                 if crn == 8 {
                     self.flush_tlb();
+                }
+                if crn == 7 && crm == 4 && op1 == 3 && op2 == 1 && !l {
+                    let va = (if rt == 31 { 0 } else { ctx.x[rt as usize] }) & !63u64;
+                    for i in 0..8u64 {
+                        tryv!(self.store(va + i * 8, 8, 0));
+                    }
+                }
+                if crn == 7 && crm == 8 && !l {
+                    let va = if rt == 31 { 0 } else { ctx.x[rt as usize] };
+                    let par = if !self.mmu.enabled() { va & 0x0000_ffff_ffff_f000 } else {
+                        match self.mmu.translate(&self.ram, va) {
+                            Ok(pa) => (pa & 0x0000_ffff_ffff_f000) | 0x800 ,
+                            Err(_) => 1,
+                        }
+                    };
+                    let par = if par & 1 == 0 { (par & !0xfff) | (par & 0x800) | (va & 0 ) } else { par };
+                    self.sys.insert(sysreg_id(3, 0, 7, 4, 0), par);
                 }
                 if say {
                     println!("#{} {:#x} sys op1 {} c{} c{} op2 {} x{}", self.events, pc, op1, crn, crm, op2, rt);
@@ -471,12 +606,38 @@ impl Machine {
                 }
                 ctx.x[0] = ret;
             }
+            Insn::Eret => {
+                let spsr = ctx.sys[5];
+                let elr = ctx.sys[4];
+                let m = spsr & 0xf;
+                if m != 5 && m != 4 {
+                    return Step::Stop(format!("eret to unsupported mode {:#x} at {:#x}", spsr, pc));
+                }
+                if m == 4 && self.spsel == 1 {
+                    self.sp_el1 = ctx.x[31];
+                    ctx.x[31] = ctx.sys[3];
+                    self.spsel = 0;
+                } else if m == 5 && self.spsel == 0 {
+                    ctx.sys[3] = ctx.x[31];
+                    ctx.x[31] = self.sp_el1;
+                    self.spsel = 1;
+                }
+                self.daif = spsr & 0x3c0;
+                self.pan = (spsr >> 22) & 1;
+                ctx.flags = anathema_xlat::run::nzcv_to_flags(spsr, ctx.flags);
+                ctx.pc = elr;
+                if self.say_exc {
+                    println!("eret -> {:#x}", elr);
+                }
+                return Step::Next;
+            }
             Insn::Hint { op } if op == 2 || op == 3 => {
                 return Step::Stop(format!("wait for event/interrupt at {:#x}", pc));
             }
             Insn::Hint { .. } => {}
             Insn::Unsup(_) if crate::simd::fallback(ctx, w) => {}
             Insn::Unsup(_) if w & 0xbe00_0000 == 0x0c00_0000 => tryv!(self.struct_ldst(ctx, w)),
+            _ if crate::simd::fallback(ctx, w) => {}
             _ => return Step::Stop(format!("unhandled instruction {:08x} ({}) at {:#x}", w, insn.name(), pc)),
         }
         ctx.pc = pc + 4;
@@ -597,7 +758,16 @@ impl Machine {
             return self.daif;
         }
         if id == sysreg_id(3, 3, 14, 0, 1) || id == sysreg_id(3, 3, 14, 0, 2) {
-            return self.started.elapsed().as_nanos() as u64 * 24 / 1000;
+            if std::env::var("RT_REALTIME").is_ok() {
+                return self.started.elapsed().as_nanos() as u64 * 24 / 1000;
+            }
+            return 1_000_000 + self.events as u64 * 24;
+        }
+        if id == sysreg_id(3, 0, 4, 2, 0) {
+            return self.spsel;
+        }
+        if id == sysreg_id(3, 0, 4, 2, 3) {
+            return self.pan << 22;
         }
         self.sys.get(&id).copied().unwrap_or(0)
     }
@@ -606,6 +776,9 @@ impl Machine {
         self.sys.insert(id, v);
         if id == sysreg_id(3, 3, 4, 2, 1) {
             self.daif = v & 0x3c0;
+        }
+        if id == sysreg_id(3, 0, 4, 2, 3) {
+            self.pan = (v >> 22) & 1;
         }
         if id == sysreg_id(3, 0, 1, 0, 0) {
             self.mmu.sctlr = v;

@@ -3,7 +3,7 @@ use crate::macho::Image;
 use crate::mem::{Ram, RAM_BASE, RAM_SIZE};
 
 pub const KERNEL_PA: u64 = RAM_BASE + 0x0300_4000;
-pub const FB_PA: u64 = RAM_BASE + 0x0900_0000;
+pub const FB_PA: u64 = 0x6000_0000;
 
 pub struct Loaded {
     pub entry_pa: u64,
@@ -79,6 +79,10 @@ pub fn load_kernel(ram: &Ram, img: &Image, data: &[u8], dt_bytes: &[u8], cmdline
         b.push(0);
         chosen.set("boot-args", b);
         chosen.set("kaslr-seed", vec![0u8; 8]);
+        chosen.set("nvram-proxy-data", nvram_image(0x2000));
+        chosen.set("nvram-bank-size", 0x2000u32.to_le_bytes().to_vec());
+        chosen.set("nvram-bank-count", 2u32.to_le_bytes().to_vec());
+        chosen.set("nvram-current-bank", 0u32.to_le_bytes().to_vec());
         chosen.set("dram-base", RAM_BASE.to_le_bytes().to_vec());
         chosen.set("dram-size", RAM_SIZE.to_le_bytes().to_vec());
     }
@@ -98,12 +102,13 @@ pub fn load_kernel(ram: &Ram, img: &Image, data: &[u8], dt_bytes: &[u8], cmdline
     put64(args, 0x10, KERNEL_PA);
     put64(args, 0x18, RAM_SIZE - (KERNEL_PA - RAM_BASE));
     put64(args, 0x20, top);
-    put64(args, 0x28, FB_PA);
-    put64(args, 0x30, 1);
-    put64(args, 0x38, 1920 * 4);
-    put64(args, 0x40, 1920);
-    put64(args, 0x48, 1080);
-    put64(args, 0x50, 32);
+    let video = std::env::var("RT_VIDEO").is_ok();
+    put64(args, 0x28, if video { FB_PA } else { 0 });
+    put64(args, 0x30, if video { std::env::var("RT_VDISP").ok().and_then(|v| v.parse().ok()).unwrap_or(1) } else { 0 });
+    put64(args, 0x38, if video { 1920 * 4 } else { 0 });
+    put64(args, 0x40, if video { 1920 } else { 0 });
+    put64(args, 0x48, if video { 1080 } else { 0 });
+    put64(args, 0x50, if video { 32 } else { 0 });
     put32(args, 0x58, 0);
     put64(args, 0x60, virt_base + (dt_pa - KERNEL_PA));
     put32(args, 0x68, dt_final.len() as u32);
@@ -113,4 +118,45 @@ pub fn load_kernel(ram: &Ram, img: &Image, data: &[u8], dt_bytes: &[u8], cmdline
     put64(args, 0x478, RAM_SIZE);
     println!("devicetree at {:#x} ({} bytes), boot args at {:#x}, top of kernel data {:#x}", dt_pa, dt_final.len(), args_pa, top);
     Loaded { entry_pa: KERNEL_PA + (img.entry - virt_base), args_pa, virt_base }
+}
+
+fn nvram_image(size: usize) -> Vec<u8> {
+    fn cksum(h: &[u8]) -> u8 {
+        let mut s: u32 = 0;
+        for (i, b) in h.iter().take(16).enumerate() {
+            if i != 1 {
+                s += *b as u32;
+            }
+        }
+        while s > 255 {
+            s = (s >> 8) + (s & 0xff);
+        }
+        s as u8
+    }
+    fn part(img: &mut [u8], off: usize, sig: u8, len16: usize, name: &str) {
+        img[off] = sig;
+        img[off + 2] = (len16 & 0xff) as u8;
+        img[off + 3] = (len16 >> 8) as u8;
+        for (i, c) in name.bytes().enumerate().take(12) {
+            img[off + 4 + i] = c;
+        }
+        img[off + 1] = cksum(&img[off..off + 16]);
+    }
+    let mut img = vec![0u8; size];
+    let hdr = 32usize;
+    let common = (size - hdr) / 2 / 16 * 16;
+    let system = size - hdr - common;
+    part(&mut img, 0, 0x5a, hdr / 16, "nvram");
+    part(&mut img, hdr, 0x70, common / 16, "common");
+    part(&mut img, hdr + common, 0x70, system / 16, "system");
+    img[20..24].copy_from_slice(&1u32.to_le_bytes());
+    let mut a: u32 = 1;
+    let mut b: u32 = 0;
+    for byte in &img[20..] {
+        a = (a + *byte as u32) % 65521;
+        b = (b + a) % 65521;
+    }
+    let ad = (b << 16) | a;
+    img[16..20].copy_from_slice(&ad.to_le_bytes());
+    img
 }

@@ -1,4 +1,5 @@
 mod boot;
+mod fbcheck;
 mod dt;
 mod machine;
 mod macho;
@@ -46,6 +47,11 @@ fn install_segv() {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(|s| s.as_str()) == Some("fbcheck") {
+        let per: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(2000);
+        fbcheck::run(0x1234_5678_9abc_def1, per);
+        return;
+    }
     if args.get(1).map(|s| s.as_str()) == Some("dt") {
         let d = std::fs::read(&args[2]).expect("read devicetree");
         let root = dt::parse(&d);
@@ -87,10 +93,12 @@ fn main() {
     let ring_on = std::env::var("RT_RING").is_ok() || bps.is_some();
     let trace_on = ring_on || std::env::var("RT_TRACE").is_ok();
     let mut ring: VecDeque<u64> = VecDeque::new();
+    let ring_max: usize = std::env::var("RT_RINGN").ok().and_then(|v| v.parse().ok()).unwrap_or(400);
     let reason = loop {
         let key = ctx.pc >> 30;
         let runner = runners.entry(key).or_insert_with(|| {
             let mut cfg = Config::new(MemModel::Exit);
+            cfg.indirect_flags_dead = false;
             cfg.pc_base = key << 30;
             if ring_on {
                 cfg.max_insns = 1;
@@ -119,7 +127,7 @@ fn main() {
         }
         if trace_on {
             ring.push_back(ctx.pc);
-            if ring.len() > 400 {
+            if ring.len() > ring_max {
                 ring.pop_front();
             }
         }
@@ -198,6 +206,11 @@ fn main() {
             if fp == 0 { break }
         }
     }
+    if let Ok(v) = std::env::var("RT_WALK") {
+        if let Ok(va) = u64::from_str_radix(v.trim_start_matches("0x"), 16) {
+            print!("{}", m.mmu.walk_debug(&m.ram, va));
+        }
+    }
     if std::env::var("RT_PAS").is_ok() {
         let mut a = ctx.x[31];
         for _ in 0..600 {
@@ -223,6 +236,16 @@ fn main() {
                 println!("peek {:#x} = {:?}", va, m.load(va, 8));
             }
         }
+    }
+    {
+        let tp = ctx.sys[2];
+        let a = m.load(tp + 408, 8).unwrap_or(0);
+        let b = m.load(a + 40, 8).unwrap_or(0);
+        println!("tpidr_el1 {:#x} [+408]={:#x} [that+40]={:#x} elr {:#x} esr {:#x} far {:#x} spsr {:#x} vbar {:#x}", tp, a, b, ctx.sys[4], ctx.sys[7], ctx.sys[6], ctx.sys[5], ctx.sys[8]);
+    }
+    if let Ok(path) = std::env::var("RT_FBDUMP") {
+        let buf = m.bus.fb.clone();
+        let _ = std::fs::write(path, buf);
     }
     println!("sctlr {:#x} tcr {:#x} ttbr0 {:#x} ttbr1 {:#x}", m.mmu.sctlr, m.mmu.tcr, m.mmu.ttbr0, m.mmu.ttbr1);
     match m.translate(ctx.pc) {

@@ -14,6 +14,35 @@ pub struct Fault {
 }
 
 impl Mmu {
+    pub fn walk_debug(&self, ram: &Ram, va: u64) -> String {
+        let upper = (va >> 55) & 1 == 1;
+        let (tsz, ttbr) = if upper { ((self.tcr >> 16) & 0x3f, self.ttbr1) } else { (self.tcr & 0x3f, self.ttbr0) };
+        let va_bits = 64 - tsz as u32;
+        let mut table = ttbr & 0x0000_ffff_ffff_fffe & !0x3f;
+        let mut out = format!("walk {:#x} ttbr {:#x}
+", va, table);
+        let mut shift = 36u32;
+        for level in 1..4 {
+            let idx_bits = if shift == 36 { va_bits - 36 } else { 11 };
+            let idx = (va >> shift) & ((1u64 << idx_bits) - 1);
+            let at = table + idx * 8;
+            if !ram.contains(at, 8) {
+                out += &format!(" L{} at {:#x} outside ram
+", level, at);
+                break;
+            }
+            let desc = ram.read(at, 8);
+            out += &format!(" L{} idx {} at {:#x} = {:#x}
+", level, idx, at, desc);
+            if desc & 3 != 3 || level == 3 {
+                break;
+            }
+            table = desc & 0x0000_ffff_ffff_c000;
+            shift -= 11;
+        }
+        out
+    }
+
     pub fn enabled(&self) -> bool {
         self.sctlr & 1 != 0
     }
