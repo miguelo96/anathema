@@ -1,5 +1,5 @@
 use anathema_media::readat::{FileAt, ReadAt};
-use anathema_media::{aea, apfs, download, feed, hash, http, im4p, manifest, zip};
+use anathema_media::{aea, apfs, dsc, download, feed, hash, http, im4p, manifest, zip};
 use anyhow::{bail, Context, Result};
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -303,6 +303,30 @@ fn run(args: Vec<String>) -> Result<()> {
                 eprintln!();
                 println!("{comp}: -> {}", target.display());
             }
+        }
+        "dsc-ls" => {
+            let dir = a.pos.first().context("usage: dsc-ls <dir> [substring]")?;
+            let d = dsc::Dsc::open(Path::new(dir), a.opt("prefix").unwrap_or("dyld_shared_cache_arm64e"))?;
+            let needle = a.pos.get(1).map(String::as_str).unwrap_or("");
+            for (addr, p) in d.find(needle) {
+                println!("{addr:#x} {p}");
+            }
+        }
+        "dsc-text" => {
+            let dir = a.pos.first().context("usage: dsc-text <dir> <image substring> --out DIR")?;
+            let needle = a.pos.get(1).context("usage: dsc-text <dir> <image substring> --out DIR")?;
+            let outd = PathBuf::from(a.opt("out").context("--out DIR is required")?);
+            std::fs::create_dir_all(&outd)?;
+            let d = dsc::Dsc::open(Path::new(dir), a.opt("prefix").unwrap_or("dyld_shared_cache_arm64e"))?;
+            let hit = d.find(needle).into_iter().find(|(_, p)| p.ends_with(needle.as_str())).or_else(|| d.find(needle).into_iter().next()).context("no such image")?;
+            let secs = d.sections(hit.0)?;
+            let text = secs.iter().find(|s| s.segment == "__TEXT" && s.name == "__text").context("no __text section")?;
+            let base = hit.1.rsplit('/').next().unwrap_or("image");
+            let bytes = d.read_vm(text.addr, text.size as usize)?;
+            std::fs::write(outd.join(format!("{base}.bin")), &bytes)?;
+            std::fs::write(outd.join(format!("{base}.addr")), format!("{:#x}
+", text.addr))?;
+            println!("{} __text {} bytes at {:#x}", hit.1, bytes.len(), text.addr);
         }
         "extract-member" => {
             let member = a.pos.get(1).context("usage: extract-member <ipsw> <member> --out <file>")?;

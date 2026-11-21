@@ -2,6 +2,7 @@ pub mod aea;
 pub mod apfs;
 pub mod codec;
 pub mod download;
+pub mod dsc;
 pub mod feed;
 pub mod hash;
 pub mod http;
