@@ -109,6 +109,7 @@ impl DirEntry {
 struct Node<'a> {
     d: &'a [u8],
     leaf: bool,
+    hashed: bool,
     fixed: bool,
     n: usize,
     toc: usize,
@@ -128,6 +129,7 @@ impl<'a> Node<'a> {
         Ok(Node {
             d,
             leaf: flags & 2 != 0,
+            hashed: flags & 8 != 0,
             fixed: flags & 4 != 0,
             n: le32(d, 36) as usize,
             toc: 56 + toc_off,
@@ -318,7 +320,7 @@ impl Container {
     ) -> Result<bool> {
         let blk = self.block(root)?;
         let (ks, vs) = root_info(&blk);
-        self.walk_node(&blk, ks, vs, None, want, visit)
+        self.walk_node(&blk, ks, vs, None, 0, want, visit)
     }
 
     fn walk_node(
@@ -327,6 +329,7 @@ impl Container {
         ks: usize,
         vs: usize,
         virt: Option<(u64, u64)>,
+        base: u64,
         want: &dyn Fn(&[u8]) -> Ordering,
         visit: &mut dyn FnMut(&[u8], &[u8]) -> Result<bool>,
     ) -> Result<bool> {
@@ -357,7 +360,7 @@ impl Container {
                     continue;
                 }
             }
-            let child = le64(v, 0);
+            let child = le64(v, 0) + if node.hashed { base } else { 0 };
             let addr = match virt {
                 Some((omap, xid)) => self
                     .omap_lookup(omap, child, xid)?
@@ -365,7 +368,7 @@ impl Container {
                 None => child,
             };
             let cb = self.block(addr)?;
-            if !self.walk_node(&cb, ks, vs, virt, want, visit)? {
+            if !self.walk_node(&cb, ks, vs, virt, base, want, visit)? {
                 return Ok(false);
             }
         }
@@ -407,7 +410,7 @@ impl<'a> Volume<'a> {
         let b = self.c.block(blk)?;
         let (ks, vs) = root_info(&b);
         let virt = self.child_virt(&b);
-        self.c.walk_node(&b, ks, vs, virt, &|k| hdr(k).cmp(&(id, ty)), visit)?;
+        self.c.walk_node(&b, ks, vs, virt, self.root_tree, &|k| hdr(k).cmp(&(id, ty)), visit)?;
         Ok(())
     }
 
@@ -422,7 +425,7 @@ impl<'a> Volume<'a> {
         let (ks, vs) = root_info(&b);
         let mut out = Vec::new();
         let virt = self.child_virt(&b);
-        self.c.walk_node(&b, ks, vs, virt, &|_| Ordering::Equal, &mut |k, v| {
+        self.c.walk_node(&b, ks, vs, virt, self.root_tree, &|_| Ordering::Equal, &mut |k, v| {
             let (i, t) = hdr(k);
             out.push((i, t, v.len()));
             Ok(out.len() < n)
@@ -515,7 +518,7 @@ impl<'a> Volume<'a> {
                 let b = self.c.block(root)?;
                 let (ks, vs) = root_info(&b);
                 let virt = if virt { self.child_virt(&b) } else { None };
-                self.c.walk_node(&b, ks, vs, virt, &|k| le64(k, 0).cmp(&private_id), &mut |k, v| {
+                self.c.walk_node(&b, ks, vs, virt, oid, &|k| le64(k, 0).cmp(&private_id), &mut |k, v| {
                     ex.push((le64(k, 8), le64(v, 0) & 0x00ff_ffff_ffff_ffff, le64(v, 8)));
                     Ok(true)
                 })?;
@@ -610,6 +613,7 @@ impl<'a> Volume<'a> {
                     zlib(inline, usize_)?
                 }
             }
+            13 => codec::block(inline, usize_)?,
             7 | 11 => {
                 if inline.first() == Some(&0x06) && kind == 7 {
                     inline[1..].to_vec()
@@ -636,7 +640,7 @@ impl<'a> Volume<'a> {
                 }
                 out
             }
-            8 | 12 => {
+            8 | 12 | 14 => {
                 let r = rsrc(self)?;
                 let nblocks = usize_.div_ceil(65536);
                 let mut offs = Vec::with_capacity(nblocks + 1);
@@ -649,6 +653,8 @@ impl<'a> Volume<'a> {
                     let want = (usize_ - out.len()).min(65536);
                     if chunk.first() == Some(&0x06) && kind == 8 {
                         out.extend_from_slice(&chunk[1..]);
+                    } else if kind == 14 {
+                        out.extend(codec::block(chunk, want)?);
                     } else {
                         out.extend(codec::lzvn_or_lzfse(chunk, want)?);
                     }
