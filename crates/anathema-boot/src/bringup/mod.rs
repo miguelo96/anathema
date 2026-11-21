@@ -1,5 +1,9 @@
 pub mod apic;
 pub mod crash;
+pub mod gpt;
+pub mod iommu;
+pub mod nvme;
+pub mod pcicfg;
 pub mod isr;
 mod isr_gen;
 pub mod log;
@@ -108,6 +112,12 @@ pub struct Prep {
     pub fb_bgr: bool,
     pub shadow: u64,
     pub cores: usize,
+    pub ecam: u64,
+    pub iommu_base: u64,
+    pub iommu_bdf: u16,
+    pub nvme_bdf: u16,
+    pub iommu_mem: u64,
+    pub dma: u64,
 }
 
 pub static mut PREP: Prep = Prep {
@@ -129,7 +139,24 @@ pub static mut PREP: Prep = Prep {
     fb_bgr: true,
     shadow: 0,
     cores: 0,
+    ecam: 0,
+    iommu_base: 0,
+    iommu_bdf: 0,
+    nvme_bdf: 0xffff,
+    iommu_mem: 0,
+    dma: 0,
 };
+
+pub static mut IOMMU: iommu::Outcome = iommu::Outcome::new();
+pub static mut STORAGE: gpt::Storage = gpt::Storage::new();
+
+pub fn iommu_outcome() -> &'static mut iommu::Outcome {
+    unsafe { &mut *core::ptr::addr_of_mut!(IOMMU) }
+}
+
+pub fn storage() -> &'static mut gpt::Storage {
+    unsafe { &mut *core::ptr::addr_of_mut!(STORAGE) }
+}
 
 pub struct Results {
     pub int3: bool,
@@ -277,7 +304,7 @@ fn alloc(ty: AllocateType, pages: usize) -> Option<u64> {
     boot::allocate_pages(ty, MemoryType::LOADER_DATA, pages).ok().map(|p| p.as_ptr() as u64)
 }
 
-pub fn run(screen: &mut Screen) -> String {
+pub fn run(screen: &mut Screen, inventory: &crate::report::Inventory) -> String {
     persist::clear();
     blog!("anathema bring-up test");
     blog!("firmware {} rev {:#x}", uefi::system::firmware_vendor(), uefi::system::firmware_revision());
@@ -322,6 +349,20 @@ pub fn run(screen: &mut Screen) -> String {
     prep.stacks = stacks;
     prep.bsp_stack = stacks + (smp::STACK_SIZE * (count + 1)) as u64 - 16;
     blog!("trampoline page {:#x}, page tables {:#x}, stacks {:#x} ({} x {} KiB)", tramp, tables, stacks, count + 1, smp::STACK_SIZE / 1024);
+    if let Some(ecam) = inventory.tables.ecam.first() {
+        prep.ecam = ecam.base;
+        if let Some(unit) = inventory.tables.iommus.first() {
+            prep.iommu_base = unit.base;
+            prep.iommu_bdf = unit.device;
+            prep.iommu_mem = alloc(AllocateType::AnyPages, iommu::TOTAL_PAGES).unwrap_or(0);
+            blog!("amd-vi unit {:02x}:{:02x}.{} mmio {:#x}, {} pages reserved", unit.device >> 8, (unit.device >> 3) & 0x1f, unit.device & 7, unit.base, iommu::TOTAL_PAGES);
+        }
+        if let Some(func) = inventory.funcs.iter().find(|f| f.class == 1 && f.sub == 8) {
+            prep.nvme_bdf = ((func.bus as u16) << 8) | ((func.dev as u16) << 3) | func.func as u16;
+            prep.dma = alloc(AllocateType::AnyPages, nvme::DMA_PAGES).unwrap_or(0);
+            blog!("nvme controller {:02x}:{:02x}.{} {:04x}:{:04x}", func.bus, func.dev, func.func, func.vendor, func.device);
+        }
+    }
     let info = &screen.info;
     if info.format != "blt only" {
         let bytes = info.width * info.height * 4;
@@ -415,6 +456,10 @@ extern "sysv64" fn boot_core() -> ! {
     timers(&local, prep, res);
     persist::save(log::text());
     smp_start(&local, prep, res);
+    persist::save(log::text());
+    iommu::takeover(prep, iommu_outcome());
+    persist::save(log::text());
+    storage_stage(prep);
     persist::save(log::text());
     screen::draw_status();
     persist::save(log::text());
@@ -538,4 +583,22 @@ fn smp_start(local: &Local, prep: &Prep, res: &mut Results) {
             slot.rsp.load(Ordering::SeqCst)
         );
     }
+}
+
+fn storage_stage(prep: &Prep) {
+    let storage = storage();
+    if prep.nvme_bdf == 0xffff {
+        storage.state = 3;
+        storage.note = "no nvme controller";
+        return;
+    }
+    let drive = &mut storage.drive;
+    let Some(mut nvme) = nvme::bring_up(prep, drive) else {
+        storage.state = 2;
+        storage.note = "controller bring up failed";
+        return;
+    };
+    gpt::read_disk(&mut nvme, storage);
+    nvme.shutdown();
+    blog!("nvme: io queues deleted and controller shut down, no write command was ever built");
 }

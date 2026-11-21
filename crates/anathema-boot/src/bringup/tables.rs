@@ -35,14 +35,14 @@ pub unsafe fn load_idt() {
     core::arch::asm!("lidt [{p}]", p = in(reg) &pointer);
 }
 
-pub const TABLE_PAGES: usize = 8;
+pub const TABLE_PAGES: usize = 9;
 const PRESENT: u64 = 1;
 const WRITE: u64 = 2;
 const HUGE: u64 = 0x80;
 const UNCACHED: u64 = 0x18;
 const GIB: u64 = 1 << 30;
 const MIB2: u64 = 1 << 21;
-const LIMIT: u64 = 512 * GIB;
+const LIMIT: u64 = 2048 * GIB;
 
 pub struct Ram {
     pub ranges: [(u64, u64); 256],
@@ -110,8 +110,6 @@ pub unsafe fn build_paging(tables: u64, ram: &Ram) -> PagingStats {
     let base = tables as *mut u64;
     core::ptr::write_bytes(base as *mut u8, 0, TABLE_PAGES * 4096);
     let pml4 = base;
-    let pdpt = base.add(512);
-    *pml4 = (tables + 4096) | PRESENT | WRITE;
     let mut stats = PagingStats {
         cr3: tables,
         pages_2m: 0,
@@ -121,9 +119,13 @@ pub unsafe fn build_paging(tables: u64, ram: &Ram) -> PagingStats {
         ram_top: ram.top,
         ram_ranges: ram.count as u32,
     };
+    for slot in 0..4u64 {
+        *pml4.add(slot as usize) = (tables + 4096 * (1 + slot)) | PRESENT | WRITE;
+    }
+    let pdpt = base.add(512);
     for gib in 0..4u64 {
-        let pd = base.add(512 * (2 + gib as usize));
-        *pdpt.add(gib as usize) = (tables + 4096 * (2 + gib)) | PRESENT | WRITE;
+        let pd = base.add(512 * (5 + gib as usize));
+        *pdpt.add(gib as usize) = (tables + 4096 * (5 + gib)) | PRESENT | WRITE;
         for entry in 0..512u64 {
             let address = gib * GIB + entry * MIB2;
             let wb = ram.overlaps(address, address + MIB2);
@@ -146,7 +148,7 @@ pub unsafe fn build_paging(tables: u64, ram: &Ram) -> PagingStats {
             value |= UNCACHED;
             stats.pages_1g_uc += 1;
         }
-        *pdpt.add(gib as usize) = value;
+        *base.add(512 * (1 + (gib / 512) as usize) + (gib % 512) as usize) = value;
         gib += 1;
     }
     stats

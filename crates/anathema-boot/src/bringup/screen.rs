@@ -1,4 +1,4 @@
-use super::{crash, log, prep, results, CORES, STATE_FAULT, STATE_READY};
+use super::{crash, gpt, iommu_outcome, log, nvme, prep, results, storage, CORES, STATE_FAULT, STATE_READY};
 use crate::gfx::{DIM, EMBER, EMBER_SOFT, LINE, RED, TEXT};
 use core::sync::atomic::Ordering;
 
@@ -84,6 +84,34 @@ pub fn draw_status() {
                 slot.rsp.load(Ordering::SeqCst)
             ),
         );
+        y += lh;
+    }
+    y += 6 * s;
+    fb.spaced(x, y, "STORAGE", s, 2 * s, EMBER);
+    y += lh + 2 * s;
+    fb.fill(x, y - s, fb.w - 2 * x, 1, LINE);
+    let vi = iommu_outcome();
+    let vi_colour = if vi.state == 1 { EMBER_SOFT } else if vi.state == 3 { DIM } else { RED };
+    fb.print(x, y, s, vi_colour, format_args!("amd-vi: {} ({} device entries, efr {:#x}, {} events)", vi.note, vi.devices, vi.efr, vi.events));
+    y += lh;
+    let st = storage();
+    if st.state == 1 || st.valid {
+        fb.print(x, y, s, TEXT, format_args!("nvme: {} fw {}  {} MiB  {} byte sectors  gpt header crc {} entries crc {} backup {}  ({})", nvme::trim(&st.drive.model), nvme::trim(&st.drive.firmware), (st.drive.nsze << st.drive.lba_shift) >> 20, 1u32 << st.drive.lba_shift, if st.header_crc { "ok" } else { "bad" }, if st.entries_crc { "ok" } else { "bad" }, match st.backup { 1 => "ok", 2 => "bad", _ => "n/a" }, st.note));
+        y += lh;
+        fb.print(x, y, s, DIM, format_args!("#   type                  first lba    last lba     size MiB   name"));
+        y += lh;
+        for i in 0..st.shown.min(10) {
+            let entry = st.entries[i];
+            let mib = ((entry.last + 1).saturating_sub(entry.first) << st.drive.lba_shift) >> 20;
+            fb.print(x, y, s, TEXT, format_args!("{:<3} {:<21} {:<12} {:<12} {:<10} {}", entry.index, gpt::kind_name(&entry.kind), entry.first, entry.last, mib, nvme::trim(&entry.name)));
+            y += lh;
+        }
+        if st.used as usize > st.shown.min(10) {
+            fb.print(x, y, s, DIM, format_args!("... {} more in the log", st.used as usize - st.shown.min(10)));
+            y += lh;
+        }
+    } else {
+        fb.print(x, y, s, if st.state == 2 { RED } else { DIM }, format_args!("nvme: {}", st.note));
         y += lh;
     }
     y += 6 * s;

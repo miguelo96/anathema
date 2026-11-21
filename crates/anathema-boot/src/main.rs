@@ -78,7 +78,7 @@ fn main() -> Status {
                     ui::viewer(&mut screen, "READINESS CHECK", &readiness, &full);
                     note = String::new();
                 }
-                2 => note = bringup::run(&mut screen),
+                2 => note = bringup::run(&mut screen, &inventory),
                 4 => runtime::reset(ResetType::COLD, Status::SUCCESS, None),
                 5 => runtime::reset(ResetType::SHUTDOWN, Status::SUCCESS, None),
                 _ => note = String::from("macOS boot is not part of this build yet"),
