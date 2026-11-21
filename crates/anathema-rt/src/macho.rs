@@ -6,7 +6,15 @@ pub struct Seg {
     pub fsize: u64,
 }
 
+pub struct ChainSeg {
+    pub seg_off: u64,
+    pub page_size: u64,
+    pub format: u16,
+    pub starts: Vec<u16>,
+}
+
 pub struct Image {
+    pub chains: Vec<ChainSeg>,
     pub segs: Vec<Seg>,
     pub entry: u64,
     pub chain_starts: Vec<u64>,
@@ -35,6 +43,7 @@ pub fn parse(d: &[u8]) -> Image {
     let mut entry = 0;
     let mut chain_starts = Vec::new();
     let mut chain_format = 0;
+    let mut chains = Vec::new();
     for _ in 0..ncmds {
         let cmd = u32le(d, off);
         let size = u32le(d, off + 4) as usize;
@@ -59,12 +68,32 @@ pub fn parse(d: &[u8]) -> Image {
                 }
             }
             segs.push(seg);
+        } else if cmd == 0x8000_0034 {
+            let dataoff = u32le(d, off + 8) as usize;
+            let seg_count = u32le(d, dataoff + u32le(d, dataoff + 4) as usize) as usize;
+            let sbase = dataoff + u32le(d, dataoff + 4) as usize;
+            for i in 0..seg_count {
+                let so = u32le(d, sbase + 4 + i * 4) as usize;
+                if so == 0 {
+                    continue;
+                }
+                let a = sbase + so;
+                let page_size = u16::from_le_bytes(d[a + 4..a + 6].try_into().unwrap()) as u64;
+                let format = u16::from_le_bytes(d[a + 6..a + 8].try_into().unwrap());
+                let seg_off = u64le(d, a + 8);
+                let page_count = u16::from_le_bytes(d[a + 20..a + 22].try_into().unwrap()) as usize;
+                let mut starts = Vec::new();
+                for k in 0..page_count {
+                    starts.push(u16::from_le_bytes(d[a + 22 + k * 2..a + 24 + k * 2].try_into().unwrap()));
+                }
+                chains.push(ChainSeg { seg_off, page_size, format, starts });
+            }
         } else if cmd == 0x5 {
             entry = u64le(d, off + 16 + 32 * 8);
         }
         off += size;
     }
-    Image { segs, entry, chain_starts, chain_format }
+    Image { chains, segs, entry, chain_starts, chain_format }
 }
 
 impl Image {

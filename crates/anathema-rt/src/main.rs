@@ -1,18 +1,19 @@
+mod boot;
+mod dt;
+mod machine;
 mod macho;
+mod mem;
+mod mmu;
+mod simd;
 
-use anathema_xlat::decode::{decode, ExcKind, Insn};
-use anathema_xlat::run::{Ctx, Region, Runner, Stop};
-use anathema_xlat::trans::{sysreg_id, Config, Fetch, MemModel};
-use std::collections::HashMap;
-
-const HOST_BASE: u64 = 0x2000_0000_0000;
-const PBASE: u64 = 0x8_2000_0000;
-const RAM_BASE: u64 = 0x8_0000_0000;
-const RAM_SIZE: u64 = 0x2_0000_0000;
-const SCRATCH: u64 = 0x80_0000;
+use anathema_xlat::run::{Ctx, Runner, Stop};
+use anathema_xlat::trans::{Config, MemModel};
+use machine::{Fetcher, Machine, Step};
+use mem::{Ram, RAM_BASE, RAM_SIZE};
+use std::cell::RefCell;
+use std::collections::{HashMap, VecDeque};
 
 static mut CTX_PTR: *const Ctx = std::ptr::null();
-static mut BIAS: u64 = 0;
 
 #[repr(C)]
 struct SigAction {
@@ -30,7 +31,7 @@ extern "C" fn on_segv(_sig: i32, info: *const u8, _uc: *mut u8) {
     unsafe {
         let addr = *(info.add(16) as *const u64);
         let pc = if CTX_PTR.is_null() { 0 } else { (*CTX_PTR).pc };
-        eprintln!("host fault at {:#x} (guest {:#x}) in block starting at guest pc {:#x}", addr, addr.wrapping_sub(BIAS), pc);
+        eprintln!("host fault at {:#x} in block starting at guest pc {:#x}", addr, pc);
         std::process::exit(99);
     }
 }
@@ -43,208 +44,114 @@ fn install_segv() {
     }
 }
 
-struct Guest {
-    bias: u64,
-    lo: u64,
-    hi: u64,
-}
-
-impl Fetch for Guest {
-    fn word(&self, pc: u64) -> Option<u32> {
-        if pc < self.lo || pc >= self.hi || pc & 3 != 0 {
-            return None;
-        }
-        Some(unsafe { *(pc.wrapping_add(self.bias) as *const u32) })
-    }
-}
-
-fn sysname(id: u16) -> String {
-    let op0 = 2 | ((id >> 14) & 1);
-    format!("S{}_{}_C{}_C{}_{}", op0, (id >> 11) & 7, (id >> 7) & 15, (id >> 3) & 15, id & 7)
-}
-
-fn apply_chain(img: &macho::Image, bias: u64) -> (usize, usize) {
-    let base = img.lo();
-    let mut count = 0;
-    let mut bad = 0;
-    for &start in &img.chain_starts {
-        let mut va = img.va_of_fileoff(start).expect("chain start inside a segment");
-        loop {
-            let p = va.wrapping_add(bias) as *mut u64;
-            let v = unsafe { *p };
-            let next = (v >> 51) & 0xfff;
-            let target = v & 0x3fff_ffff;
-            let new = base + target;
-            if new < img.lo() || new >= img.hi() {
-                bad += 1;
-            }
-            unsafe { *p = new };
-            count += 1;
-            if next == 0 {
-                break;
-            }
-            va += next * 4;
-        }
-    }
-    (count, bad)
-}
-
-fn reg(ctx: &Ctx, r: u8) -> u64 {
-    if r == 31 {
-        0
-    } else {
-        ctx.x[r as usize]
-    }
-}
-
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let path = args.get(1).cloned().unwrap_or_else(|| "sptm.bin".into());
-    let limit_events: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(400);
-    let data = std::fs::read(&path).expect("read image");
-    let img = macho::parse(&data);
-    let span = img.hi() - img.lo();
-    let phys = !args.iter().any(|a| a == "--virt");
-    let lo = if phys { PBASE } else { img.lo() };
-    let hi = lo + span + SCRATCH;
-    let len = ((hi - lo) as usize + 0xfff) & !0xfff;
-    let host = if phys { PBASE } else { HOST_BASE };
-    let bias = host.wrapping_sub(lo);
-    let _region = Region::fixed(host as usize, len, false).expect("map guest window");
-    unsafe {
-        BIAS = bias;
-    }
-    for s in &img.segs {
-        if s.fsize > 0 {
-            let dst = (lo + (s.vm - img.lo())).wrapping_add(bias) as *mut u8;
-            let n = s.fsize as usize;
-            unsafe { std::ptr::copy_nonoverlapping(data.as_ptr().add(s.off as usize), dst, n) };
+    if args.get(1).map(|s| s.as_str()) == Some("dt") {
+        let d = std::fs::read(&args[2]).expect("read devicetree");
+        let root = dt::parse(&d);
+        let depth: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(2);
+        let mut node = &root;
+        if let Some(path) = args.get(4) {
+            for part in path.split('/') {
+                node = node.child(part).expect("no such node");
+            }
         }
+        dt::dump(node, 0, depth, &[]);
+        return;
     }
-    let entry = lo + (img.entry - img.lo());
-    println!("image {} link lo {:#x} entry {:#x} chain format {} starts {:?}", path, img.lo(), img.entry, img.chain_format, img.chain_starts);
-    if !phys {
-        let (fixed, bad) = apply_chain(&img, bias);
-        println!("chained fixups applied: {} (out of range: {})", fixed, bad);
-    }
+    let kpath = args.get(1).cloned().unwrap_or_else(|| "kc-vm.macho".into());
+    let dpath = args.get(2).cloned().unwrap_or_else(|| "dt-vm.bin".into());
+    let trace: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(200);
+    let cmdline = std::env::var("RT_BOOTARGS").unwrap_or_else(|_| "-v serial=3 debug=0x14e".into());
+    let kdata = std::fs::read(&kpath).expect("read kernel");
+    let img = macho::parse(&kdata);
+    let dtb = std::fs::read(&dpath).expect("read devicetree");
+    let ram = Ram::new(RAM_BASE, RAM_SIZE);
+    let loaded = boot::load_kernel(&ram, &img, &kdata, &dtb, &cmdline);
+    let mut m = Machine::new(ram);
+    m.trace_budget = trace;
     install_segv();
-
-    let args_va = lo + span + 0x1000;
-    let stack_va = hi - 0x1000;
-    unsafe {
-        let a = args_va.wrapping_add(bias) as *mut u64;
-        *a = 3;
-        *a.add(1) = 0xfffffe0007004000;
-        *a.add(2) = RAM_BASE;
-        *a.add(3) = RAM_SIZE;
-    }
-    let mut cfg = Config::new(if phys { MemModel::Identity } else { MemModel::Biased });
-    cfg.pc_base = lo;
-    cfg.bias = bias;
-    let mut runner = Runner::new(cfg);
     let mut ctx = Box::new(Ctx::default());
-    ctx.pc = entry;
-    ctx.x[0] = args_va;
-    ctx.x[31] = stack_va;
+    ctx.pc = loaded.entry_pa;
+    ctx.x[0] = loaded.args_pa;
     unsafe {
         CTX_PTR = &*ctx as *const Ctx;
     }
-    let guest = Guest { bias, lo, hi };
+    println!("starting at physical {:#x}, boot args {:#x}", ctx.pc, ctx.x[0]);
 
-    let mut sregs: HashMap<u16, u64> = HashMap::new();
-    sregs.insert(sysreg_id(3, 0, 4, 2, 2), 0x4);
-    sregs.insert(sysreg_id(3, 0, 0, 0, 5), 0x8000_0000);
-    sregs.insert(sysreg_id(3, 6, 15, 12, 4), 1);
-    let mut counts: HashMap<String, usize> = HashMap::new();
-    let mut events = 0usize;
-    let mut blocks = 0usize;
-    let mut last_pc = u64::MAX;
-    let mut same = 0usize;
+    let mut runners: HashMap<u64, Runner> = HashMap::new();
+    let mut blocks = 0u64;
+    let mut last = (u64::MAX, 0usize);
+    let limit: u64 = std::env::var("RT_BLOCKS").ok().and_then(|s| s.parse().ok()).unwrap_or(400_000_000);
+    let ring_on = std::env::var("RT_RING").is_ok();
+    let trace_on = ring_on || std::env::var("RT_TRACE").is_ok();
+    let mut ring: VecDeque<u64> = VecDeque::new();
     let reason = loop {
-        match runner.run_until_stop(&mut ctx, &guest, 4096) {
+        let key = ctx.pc >> 30;
+        let runner = runners.entry(key).or_insert_with(|| {
+            let mut cfg = Config::new(MemModel::Exit);
+            cfg.pc_base = key << 30;
+            if ring_on {
+                cfg.max_insns = 1;
+            }
+            Runner::new(cfg)
+        });
+        if trace_on {
+            ring.push_back(ctx.pc);
+            if ring.len() > 48 {
+                ring.pop_front();
+            }
+        }
+        let stop = {
+            let f = Fetcher { m: RefCell::new(&mut m) };
+            runner.run_until_stop(&mut ctx, &f, if ring_on { 1 } else { 4096 })
+        };
+        match stop {
             Stop::Budget => {
-                blocks += 4096;
-                if blocks > 20_000_000 {
-                    break "block budget".to_string();
+                blocks += if ring_on { 1 } else { 4096 };
+                if blocks > limit {
+                    break format!("block budget reached at pc {:#x}", ctx.pc);
                 }
             }
-            Stop::Refused(e) => break format!("refused at {:#x}: {}", ctx.pc, e),
+            Stop::Refused(e) => {
+                let mut flush = false;
+                match m.step(&mut ctx, &mut flush) {
+                    Step::Next => {}
+                    Step::Stop(r) => break format!("{} (translator: {})", r, e),
+                }
+            }
             Stop::Interp(pc) => {
-                let w = match guest.word(pc) {
-                    Some(w) => w,
-                    None => break format!("fetch outside image at {:#x}", pc),
-                };
-                if pc == last_pc {
-                    same += 1;
-                    if same > 50 {
+                if pc == last.0 {
+                    last.1 += 1;
+                    if last.1 > 200_000 {
                         break format!("spinning at {:#x}", pc);
                     }
                 } else {
-                    same = 0;
-                    last_pc = pc;
+                    last = (pc, 0);
                 }
-                events += 1;
-                let say = events <= limit_events;
-                match decode(w) {
-                    Insn::Mrs { rt, id } => {
-                        let v = sregs.get(&id).copied().unwrap_or(0);
-                        if rt != 31 {
-                            ctx.x[rt as usize] = v;
-                        }
-                        *counts.entry(format!("mrs {}", sysname(id))).or_default() += 1;
-                        if say {
-                            println!("#{} {:#x} mrs x{} <- {} = {:#x}", events, pc, rt, sysname(id), v);
-                        }
-                        ctx.pc = pc + 4;
+                let mut flush = false;
+                match m.step(&mut ctx, &mut flush) {
+                    Step::Next => {}
+                    Step::Stop(r) => break r,
+                }
+                if flush {
+                    for r in runners.values_mut() {
+                        r.reset_cache();
                     }
-                    Insn::Msr { rt, id } => {
-                        let v = reg(&ctx, rt);
-                        sregs.insert(id, v);
-                        *counts.entry(format!("msr {}", sysname(id))).or_default() += 1;
-                        if say {
-                            println!("#{} {:#x} msr {} <- x{} = {:#x}", events, pc, sysname(id), rt, v);
-                        }
-                        ctx.pc = pc + 4;
-                    }
-                    Insn::MsrImm { field, imm } => {
-                        *counts.entry(format!("msr-imm {}", field)).or_default() += 1;
-                        if say {
-                            println!("#{} {:#x} msr-imm field {} imm {}", events, pc, field, imm);
-                        }
-                        ctx.pc = pc + 4;
-                    }
-                    Insn::Sys { l, op1, crn, crm, op2, rt } => {
-                        *counts.entry(format!("sys {} {} c{} c{} {}", if l { "sysl" } else { "sys" }, op1, crn, crm, op2)).or_default() += 1;
-                        if say {
-                            println!("#{} {:#x} sys op1 {} c{} c{} op2 {} x{} (ignored)", events, pc, op1, crn, crm, op2, rt);
-                        }
-                        ctx.pc = pc + 4;
-                    }
-                    Insn::Hint { op } if op == 2 || op == 3 => {
-                        break format!("wait-for-event/interrupt at {:#x} (x0 {:#x})", pc, ctx.x[0]);
-                    }
-                    Insn::Hint { .. } => {
-                        ctx.pc = pc + 4;
-                    }
-                    Insn::Exc { kind, imm } => {
-                        let k = match kind {
-                            ExcKind::Svc => "svc",
-                            ExcKind::Hvc => "hvc",
-                            ExcKind::Smc => "smc",
-                            ExcKind::Brk => "brk",
-                            ExcKind::Hlt => "hlt",
-                            ExcKind::Udf => "udf",
-                        };
-                        break format!("{} #{:#x} at {:#x}", k, imm, pc);
-                    }
-                    Insn::Eret => break format!("eret at {:#x}", pc),
-                    other => break format!("unhandled instruction {:08x} ({}) at {:#x}", w, other.name(), pc),
                 }
             }
         }
     };
+    println!();
+    if trace_on {
+        println!("last program counters:");
+        for pc in &ring {
+            let w = m.fetch_word(*pc).unwrap_or(0);
+            println!("  {:#x}  {:08x}", pc, w);
+        }
+    }
     println!("stopped: {}", reason);
-    println!("after {} interpreter events, {} blocks", events, blocks);
+    println!("interpreter steps {}, mmu {}", m.events, if m.mmu.enabled() { "on" } else { "off" });
     println!("pc {:#x}", ctx.pc);
     for r in 0..31 {
         print!("x{:<2} {:016x}  ", r, ctx.x[r]);
@@ -253,10 +160,27 @@ fn main() {
         }
     }
     println!("sp  {:016x}", ctx.x[31]);
-    let mut top: Vec<_> = counts.into_iter().collect();
-    top.sort_by(|a, b| b.1.cmp(&a.1));
+    println!("sctlr {:#x} tcr {:#x} ttbr0 {:#x} ttbr1 {:#x}", m.mmu.sctlr, m.mmu.tcr, m.mmu.ttbr0, m.mmu.ttbr1);
+    match m.translate(ctx.pc) {
+        Ok(pa) => {
+            println!("pc translates to {:#x}", pa);
+            if m.ram.contains(pa, 16) {
+                println!("bytes there: {:08x} {:08x} {:08x} {:08x}", m.ram.read(pa, 4), m.ram.read(pa + 4, 4), m.ram.read(pa + 8, 4), m.ram.read(pa + 12, 4));
+            }
+        }
+        Err(e) => println!("pc does not translate: {}", e),
+    }
+    let expect = boot::KERNEL_PA + (ctx.pc.wrapping_sub(loaded.virt_base));
+    if m.ram.contains(expect, 16) {
+        println!("linear expectation {:#x}: {:08x} {:08x} {:08x} {:08x}", expect, m.ram.read(expect, 4), m.ram.read(expect + 4, 4), m.ram.read(expect + 8, 4), m.ram.read(expect + 12, 4));
+    }
+    let mut top: Vec<_> = m.counts.iter().collect();
+    top.sort_by(|a, b| b.1.cmp(a.1));
     println!("system access summary:");
-    for (k, v) in top.iter().take(40) {
-        println!("  {:6} {}", v, k);
+    for (k, v) in top.iter().take(30) {
+        println!("  {:8} {}", v, k);
+    }
+    if !m.bus.uart.is_empty() {
+        println!("uart output ({} bytes) shown above", m.bus.uart.len());
     }
 }

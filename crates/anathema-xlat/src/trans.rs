@@ -52,6 +52,7 @@ pub enum MemModel {
     Identity,
     Biased,
     Checked,
+    Exit,
 }
 
 #[derive(Clone, Debug)]
@@ -234,6 +235,27 @@ fn flag_rw(i: &Insn) -> (bool, bool) {
     }
 }
 
+pub fn is_mem(i: &Insn) -> bool {
+    matches!(
+        i,
+        Insn::Ld { .. }
+            | Insn::St { .. }
+            | Insn::Ldp { .. }
+            | Insn::Stp { .. }
+            | Insn::Ldex { .. }
+            | Insn::Stex { .. }
+            | Insn::Ldar { .. }
+            | Insn::Stlr { .. }
+            | Insn::Atomic { .. }
+            | Insn::Cas { .. }
+            | Insn::Casp { .. }
+            | Insn::VLd { .. }
+            | Insn::VSt { .. }
+            | Insn::VLdp { .. }
+            | Insn::VStp { .. }
+    )
+}
+
 pub fn needs_interp(i: &Insn) -> bool {
     is_interp(i, true)
 }
@@ -323,7 +345,7 @@ pub fn translate(cfg: &Config, f: &dyn Fetch, start: u64) -> Trace {
             }
         };
         let i = decode(w);
-        if is_interp(&i, true) {
+        if is_interp(&i, true) || (cfg.mem == MemModel::Exit && is_mem(&i)) {
             if insns.is_empty() {
                 if let Insn::Unsup(n) = i {
                     refused = Some((w, n));
@@ -555,7 +577,7 @@ impl<'a> Tx<'a> {
         if small {
             self.a.mov_ri(RAX, v);
         } else {
-            self.a.mov_ri64(RAX, v);
+            self.a.mov_ri64(RAX, v.wrapping_sub(self.cfg.pc_base));
         }
     }
 

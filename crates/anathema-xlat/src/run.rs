@@ -115,7 +115,7 @@ pub enum Stop {
 
 impl Runner {
     pub fn new(cfg: Config) -> Runner {
-        let region = Region::anon(1 << 22);
+        let region = Region::anon(1 << 26);
         let mut r = Runner {
             cfg,
             region,
@@ -199,6 +199,9 @@ impl Runner {
     }
 
     pub fn compile(&mut self, f: &dyn Fetch, pc: u64) -> Result<usize, String> {
+        if self.used + (1 << 20) > self.region.len {
+            self.reset_cache();
+        }
         if let Some(&o) = self.cache.get(&pc) {
             return Ok(o);
         }

@@ -3,7 +3,7 @@ use super::*;
 impl<'a> Tx<'a> {
     pub(super) fn finish_mem(&mut self, m: Mem) -> Mem {
         match self.cfg.mem {
-            MemModel::Identity => m,
+            MemModel::Identity | MemModel::Exit => m,
             MemModel::Biased => {
                 if m.index == NOIDX {
                     Mem { base: m.base, index: R14, scale: 0, disp: m.disp }
