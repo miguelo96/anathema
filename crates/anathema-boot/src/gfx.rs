@@ -15,6 +15,7 @@ pub const EMBER_SOFT: u32 = 0xffa05a;
 pub const EMBER_DEEP: u32 = 0xd2321a;
 pub const RED: u32 = 0xff4a4a;
 
+#[derive(Clone)]
 pub struct GopInfo {
     pub width: usize,
     pub height: usize,
@@ -97,7 +98,7 @@ impl Screen {
     }
 
     pub fn scale(&self) -> usize {
-        (self.h / 540).max(1)
+        (self.h / 360).max(1)
     }
 
     pub fn clear(&mut self) {
@@ -123,12 +124,6 @@ impl Screen {
         }
     }
 
-    pub fn frame(&mut self, x: usize, y: usize, w: usize, h: usize, colour: u32) {
-        self.fill(x, y, w, 1, colour);
-        self.fill(x, y + h.saturating_sub(1), w, 1, colour);
-        self.fill(x, y, 1, h, colour);
-        self.fill(x + w.saturating_sub(1), y, 1, h, colour);
-    }
 
     fn blend(&mut self, x: usize, y: usize, colour: u32, num: u32, den: u32) {
         if x >= self.w || y >= self.h {

@@ -40,21 +40,27 @@ fn text(address: u64, len: usize) -> String {
 
 pub fn collect(report: &mut Report) -> Tables {
     report.head("acpi and system tables");
-    let mut rsdp = 0u64;
-    let mut rsdp_old = 0u64;
-    uefi::system::with_config_table(|table| {
+    let (mut_rsdp, found) = uefi::system::with_config_table(|table| {
+        let mut found: Vec<String> = Vec::new();
+        let mut rsdp = [0u64; 2];
         for entry in table {
             if entry.guid == ACPI2_GUID {
-                rsdp = entry.address as u64;
+                rsdp[0] = entry.address as u64;
             } else if entry.guid == ACPI_GUID {
-                rsdp_old = entry.address as u64;
+                rsdp[1] = entry.address as u64;
             } else if entry.guid == SMBIOS3_GUID {
-                report.say(format!("smbios 3      {:#x}", entry.address as u64));
+                found.push(format!("smbios 3      {:#x}", entry.address as u64));
             } else if entry.guid == SMBIOS_GUID {
-                report.say(format!("smbios        {:#x}", entry.address as u64));
+                found.push(format!("smbios        {:#x}", entry.address as u64));
             }
         }
+        (rsdp, found)
     });
+    for line in found {
+        report.say(line);
+    }
+    let mut rsdp = mut_rsdp[0];
+    let rsdp_old = mut_rsdp[1];
     let mut tables = Tables { ecam: Vec::new(), iommu_table: false };
     if rsdp == 0 {
         rsdp = rsdp_old;
