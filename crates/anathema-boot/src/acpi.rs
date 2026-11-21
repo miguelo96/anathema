@@ -12,9 +12,19 @@ pub struct Ecam {
     pub last_bus: u8,
 }
 
+pub struct Iommu {
+    pub device: u16,
+    pub cap: u16,
+    pub base: u64,
+    pub segment: u16,
+}
+
 pub struct Tables {
     pub ecam: Vec<Ecam>,
     pub iommu_table: bool,
+    pub iommus: Vec<Iommu>,
+    pub sigs: Vec<String>,
+    pub ivinfo: u32,
 }
 
 unsafe fn rd<T: Copy>(address: u64) -> T {
@@ -61,7 +71,7 @@ pub fn collect(report: &mut Report) -> Tables {
     }
     let mut rsdp = mut_rsdp[0];
     let rsdp_old = mut_rsdp[1];
-    let mut tables = Tables { ecam: Vec::new(), iommu_table: false };
+    let mut tables = Tables { ecam: Vec::new(), iommu_table: false, iommus: Vec::new(), sigs: Vec::new(), ivinfo: 0 };
     if rsdp == 0 {
         rsdp = rsdp_old;
     }
@@ -107,12 +117,13 @@ pub fn collect(report: &mut Report) -> Tables {
             len,
             text(address + 10, 6)
         ));
+        tables.sigs.push(sig.clone());
         match sig.as_str() {
             "MCFG" => mcfg(report, address, len, &mut tables),
             "APIC" => madt(report, address, len),
             "IVRS" => {
                 tables.iommu_table = true;
-                ivrs(report, address, len);
+                ivrs(report, address, len, &mut tables);
             }
             "DMAR" => {
                 tables.iommu_table = true;
@@ -179,8 +190,9 @@ fn madt(report: &mut Report, address: u64, len: u32) {
     ));
 }
 
-fn ivrs(report: &mut Report, address: u64, len: u32) {
+fn ivrs(report: &mut Report, address: u64, len: u32, tables: &mut Tables) {
     let info: u32 = unsafe { rd(address + 36) };
+    tables.ivinfo = info;
     report.say(format!(
         "ivrs          ivinfo {:#010x} efr {} pa bits {} va bits {}",
         info,
@@ -210,6 +222,7 @@ fn ivrs(report: &mut Report, address: u64, len: u32) {
                 base,
                 segment
             ));
+            tables.iommus.push(Iommu { device, cap, base, segment });
         }
         offset += size as u64;
     }

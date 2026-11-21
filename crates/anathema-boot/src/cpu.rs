@@ -7,7 +7,7 @@ fn flag(report: &mut Report, name: &str, on: bool) {
     report.say(format!("{:<14}{}", name, if on { "yes" } else { "no" }));
 }
 
-fn rdmsr(msr: u32) -> u64 {
+pub fn rdmsr(msr: u32) -> u64 {
     let low: u32;
     let high: u32;
     unsafe {

@@ -8,6 +8,7 @@ mod cpu;
 mod gfx;
 mod input;
 mod pci;
+mod readiness;
 mod report;
 mod store;
 mod ui;
@@ -19,8 +20,9 @@ use input::Key;
 use uefi::prelude::*;
 use uefi::runtime::{self, ResetType};
 
-const ENTRIES: [ui::Entry; 4] = [
+const ENTRIES: [ui::Entry; 5] = [
     ui::Entry { label: "Hardware report", hint: "memory, acpi, cpu, pci, display", enabled: true },
+    ui::Entry { label: "Readiness check", hint: "blockers found on this pc and our plan", enabled: true },
     ui::Entry { label: "Boot macOS", hint: "not available in this build", enabled: false },
     ui::Entry { label: "Restart", hint: "reboot the machine", enabled: true },
     ui::Entry { label: "Power off", hint: "shut the machine down", enabled: true },
@@ -39,11 +41,15 @@ fn main() -> Status {
     };
     let subtitle = format!("boot loader {}", ui::VERSION);
     let info = screen.info.clone();
-    let report = {
+    let (report, inventory) = {
         let mut step = |done: usize| ui::splash(&mut screen, done, "reading hardware");
         report::build(&info, &mut step)
     };
-    let mut note = store::save(&report.plain());
+    let readiness = readiness::run(&inventory);
+    let mut full = report.plain();
+    full.push_str("\r\n");
+    full.push_str(&readiness.plain());
+    let mut note = store::save(&full);
     let mut selected = 0usize;
     loop {
         ui::menu(&mut screen, &ENTRIES, &subtitle, &note, selected);
@@ -52,11 +58,15 @@ fn main() -> Status {
             Key::Down => selected = (selected + 1) % ENTRIES.len(),
             Key::Enter => match selected {
                 0 => {
-                    ui::viewer(&mut screen, &report, &note);
+                    ui::viewer(&mut screen, "HARDWARE REPORT", &report, &full);
                     note = String::new();
                 }
-                2 => runtime::reset(ResetType::COLD, Status::SUCCESS, None),
-                3 => runtime::reset(ResetType::SHUTDOWN, Status::SUCCESS, None),
+                1 => {
+                    ui::viewer(&mut screen, "READINESS CHECK", &readiness, &full);
+                    note = String::new();
+                }
+                3 => runtime::reset(ResetType::COLD, Status::SUCCESS, None),
+                4 => runtime::reset(ResetType::SHUTDOWN, Status::SUCCESS, None),
                 _ => note = String::from("macOS boot is not part of this build yet"),
             },
             _ => {}

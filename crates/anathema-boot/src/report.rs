@@ -1,4 +1,9 @@
 use crate::{acpi, cpu, gfx::GopInfo, pci};
+
+pub struct Inventory {
+    pub tables: acpi::Tables,
+    pub funcs: Vec<pci::Func>,
+}
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -74,7 +79,7 @@ pub const STEPS: [&str; 6] = [
     "display",
 ];
 
-pub fn build(gop: &GopInfo, step: &mut dyn FnMut(usize)) -> Report {
+pub fn build(gop: &GopInfo, step: &mut dyn FnMut(usize)) -> (Report, Inventory) {
     let mut report = Report::new();
     report.say(String::from("anathema hardware report"));
     step(0);
@@ -86,10 +91,10 @@ pub fn build(gop: &GopInfo, step: &mut dyn FnMut(usize)) -> Report {
     step(3);
     cpu::collect(&mut report, tables.iommu_table);
     step(4);
-    pci::collect(&mut report, &tables);
+    let funcs = pci::collect(&mut report, &tables);
     step(5);
     display(&mut report, gop);
-    report
+    (report, Inventory { tables, funcs })
 }
 
 fn firmware(report: &mut Report) {

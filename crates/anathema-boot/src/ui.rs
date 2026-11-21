@@ -110,15 +110,15 @@ pub fn menu(screen: &mut Screen, entries: &[Entry], subtitle: &str, note: &str, 
     screen.present();
 }
 
-pub fn viewer(screen: &mut Screen, report: &Report, saved: &str) {
+pub fn viewer(screen: &mut Screen, title: &str, report: &Report, full: &str) {
     let s = (screen.h / 540).max(1);
     let mut first = 0usize;
-    let mut note = String::from(saved);
+    let mut note = String::new();
     loop {
         screen.clear();
         let side = 14 * s;
         screen.sigil(12 * s, 8 * s, side);
-        screen.spaced(12 * s + side + 8 * s, 8 * s + (side - 8 * s) / 2, "HARDWARE REPORT", s, 3 * s, EMBER);
+        screen.spaced(12 * s + side + 8 * s, 8 * s + (side - 8 * s) / 2, title, s, 3 * s, EMBER);
         screen.fill(12 * s, 8 * s + side + 5 * s, screen.w - 24 * s, 1, LINE);
         let body_top = 8 * s + side + 12 * s;
         let body_bottom = screen.h.saturating_sub(34 * s);
@@ -158,7 +158,7 @@ pub fn viewer(screen: &mut Screen, report: &Report, saved: &str) {
             Key::End => first = max_first,
             Key::Esc => return,
             Key::Char('s') | Key::Char('S') => {
-                note = crate::store::save(&report.plain());
+                note = crate::store::save(full);
             }
             _ => {}
         }

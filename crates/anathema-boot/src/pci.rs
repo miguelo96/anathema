@@ -2,9 +2,25 @@ use crate::acpi::Tables;
 use crate::report::Report;
 use alloc::format;
 use alloc::string::String;
+use alloc::vec::Vec;
 use core::ptr::read_volatile;
 
-fn cfg(base: u64, bus: u64, dev: u64, func: u64, offset: u64) -> u32 {
+#[derive(Clone)]
+pub struct Func {
+    pub base: u64,
+    pub bus: u8,
+    pub dev: u8,
+    pub func: u8,
+    pub vendor: u16,
+    pub device: u16,
+    pub class: u8,
+    pub sub: u8,
+    pub prog: u8,
+    pub header: u8,
+    pub command: u16,
+}
+
+pub fn cfg(base: u64, bus: u64, dev: u64, func: u64, offset: u64) -> u32 {
     let address = base + (bus << 20) + (dev << 15) + (func << 12) + offset;
     unsafe { read_volatile(address as *const u32) }
 }
@@ -77,11 +93,12 @@ fn nvidia_gpu(device: u16) -> &'static str {
     }
 }
 
-pub fn collect(report: &mut Report, tables: &Tables) {
+pub fn collect(report: &mut Report, tables: &Tables) -> Vec<Func> {
+    let mut funcs = Vec::new();
     report.head("pci devices");
     if tables.ecam.is_empty() {
         report.bad(String::from("no mcfg table: pci config space not reachable through ecam"));
-        return;
+        return funcs;
     }
     let mut total = 0;
     let mut gpus = 0;
@@ -130,6 +147,19 @@ pub fn collect(report: &mut Report, tables: &Tables) {
                     } else {
                         report.dim(line);
                     }
+                    funcs.push(Func {
+                        base: region.base,
+                        bus: bus as u8,
+                        dev: dev as u8,
+                        func: func as u8,
+                        vendor,
+                        device,
+                        class,
+                        sub,
+                        prog,
+                        header: (cfg(region.base, bus, dev, func, 0x0c) >> 16) as u8 & 0x7f,
+                        command: cfg(region.base, bus, dev, func, 4) as u16,
+                    });
                     detail(report, region.base, bus, dev, func);
                 }
             }
@@ -146,6 +176,21 @@ pub fn collect(report: &mut Report, tables: &Tables) {
     if iommu == 0 {
         report.warn(String::from("no pci iommu function visible"));
     }
+    funcs
+}
+
+pub fn ext_caps(base: u64, bus: u64, dev: u64, func: u64) -> Vec<u16> {
+    let mut ids = Vec::new();
+    let mut at = 0x100u64;
+    while at >= 0x100 && at < 0x1000 && ids.len() < 48 {
+        let head = cfg(base, bus, dev, func, at);
+        if head == 0 || head == 0xffff_ffff {
+            break;
+        }
+        ids.push((head & 0xffff) as u16);
+        at = ((head >> 20) & 0xffc) as u64;
+    }
+    ids
 }
 
 fn detail(report: &mut Report, base: u64, bus: u64, dev: u64, func: u64) {
@@ -173,13 +218,23 @@ fn detail(report: &mut Report, base: u64, bus: u64, dev: u64, func: u64) {
         let mut pointer = (cfg(base, bus, dev, func, 0x34) & 0xfc) as u64;
         let mut ids = String::new();
         let mut guard = 0;
+        let mut express = false;
         while pointer >= 0x40 && guard < 48 {
             let entry = cfg(base, bus, dev, func, pointer);
+            if entry & 0xff == 0x10 {
+                express = true;
+            }
             ids.push_str(&format!(" {:02x}", entry & 0xff));
             pointer = ((entry >> 8) & 0xfc) as u64;
             guard += 1;
         }
         text.push_str(&format!(" caps{}", ids));
+        if express {
+            text.push_str(" ext");
+            for id in ext_caps(base, bus, dev, func) {
+                text.push_str(&format!(" {:x}", id));
+            }
+        }
     }
     report.dim(text);
 }
