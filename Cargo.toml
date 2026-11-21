@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/anathema-boot",
     "crates/anathema-setup",
+    "crates/anathema-xlat",
 ]
 
 [profile.release]
