@@ -62,6 +62,7 @@ pub struct Config {
     pub pc_base: u64,
     pub max_insns: usize,
     pub eflags_base: u32,
+    pub bias: u64,
     pub indirect_flags_dead: bool,
 }
 
@@ -93,7 +94,7 @@ impl Config {
         for (i, v) in DEFAULT_VORDER.iter().enumerate() {
             vpins[*v as usize] = i as u8;
         }
-        Config { pins, vpins, mem, pc_base: 0, max_insns: 128, eflags_base: 0x202, indirect_flags_dead: true }
+        Config { pins, vpins, mem, pc_base: 0, max_insns: 128, eflags_base: 0x202, bias: 0, indirect_flags_dead: true }
     }
 
     pub fn set_vorder(&mut self, order: &[u8]) {
@@ -1877,21 +1878,20 @@ impl<'a> Tx<'a> {
             (_, 2) => self.a.bswap(sf, d),
             (true, 1) => {
                 self.a.bswap(true, d);
-                self.a.shift_i(Shf::Ror, true, d, 32);
+                self.a.rorx(true, d, Rm::R(d), 32);
             }
             (false, 0) => {
                 self.a.bswap(false, d);
-                self.a.shift_i(Shf::Ror, false, d, 16);
+                self.a.rorx(false, d, Rm::R(d), 16);
             }
             _ => {
                 self.clobber();
-                self.a.bswap(true, d);
+                self.a.mov_ri(T2, 0x00ff_00ff_00ff_00ff);
                 self.a.mov_rr(true, T1, d);
-                self.a.shift_i(Shf::Shr, true, T1, 16);
-                self.a.mov_ri(T2, 0x0000_ffff_0000_ffff);
+                self.a.shift_i(Shf::Shr, true, T1, 8);
                 self.a.alu_rr(Alu::And, true, T1, T2);
                 self.a.alu_rr(Alu::And, true, d, T2);
-                self.a.shift_i(Shf::Shl, true, d, 16);
+                self.a.shift_i(Shf::Shl, true, d, 8);
                 self.a.alu_rr(Alu::Or, true, d, T1);
             }
         }

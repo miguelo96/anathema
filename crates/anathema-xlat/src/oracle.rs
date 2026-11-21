@@ -326,25 +326,34 @@ pub fn encode_b(from: u64, to: u64) -> u32 {
 
 pub struct Native {
     pub runner: Runner,
+    bias: u64,
     _data: Region,
     _code: Region,
 }
 
+pub struct GenOpts {
+    pub sp_base: bool,
+}
+
 impl Native {
     pub fn new(mem: MemModel) -> Native {
-        let mut cfg = Config::new(mem);
+        Native::with_cfg(Config::new(mem))
+    }
+
+    pub fn with_cfg(mut cfg: Config) -> Native {
         cfg.pc_base = CODE;
-        let data = Region::fixed(DATA as usize, 0x10000, false).expect("map data");
-        let code = Region::fixed(CODE as usize, 0x1000, false).expect("map code");
-        Native { runner: Runner::new(cfg), _data: data, _code: code }
+        let bias = if cfg.mem == MemModel::Identity { 0 } else { cfg.bias };
+        let data = Region::fixed((DATA + bias) as usize, 0x10000, false).expect("map data");
+        let code = Region::fixed((CODE + bias) as usize, 0x1000, false).expect("map code");
+        Native { runner: Runner::new(cfg), bias, _data: data, _code: code }
     }
 
     pub fn run(&mut self, st: &State, win: &[u8], words: &[u32]) -> Result<(State, Vec<u8>), String> {
         unsafe {
-            std::ptr::write_bytes(DATA as *mut u8, 0, 0x10000);
-            std::ptr::copy_nonoverlapping(win.as_ptr(), WIN_ADDR as *mut u8, WIN_LEN);
+            std::ptr::write_bytes((DATA + self.bias) as *mut u8, 0, 0x10000);
+            std::ptr::copy_nonoverlapping(win.as_ptr(), (WIN_ADDR + self.bias) as *mut u8, WIN_LEN);
             for (i, w) in words.iter().enumerate() {
-                *((CODE as *mut u32).add(i)) = *w;
+                *(((CODE + self.bias) as *mut u32).add(i)) = *w;
             }
         }
         self.runner.reset_cache();
@@ -363,7 +372,7 @@ impl Native {
         s.x.copy_from_slice(&ctx.x[..31]);
         let mut win_out = vec![0u8; WIN_LEN];
         unsafe {
-            std::ptr::copy_nonoverlapping(WIN_ADDR as *const u8, win_out.as_mut_ptr(), WIN_LEN);
+            std::ptr::copy_nonoverlapping((WIN_ADDR + self.bias) as *const u8, win_out.as_mut_ptr(), WIN_LEN);
         }
         Ok((s, win_out))
     }
@@ -456,14 +465,15 @@ fn dests(i: &Insn) -> Vec<u8> {
     }
 }
 
-fn mem_fix(w: u32, i: &Insn) -> Option<u32> {
+fn mem_fix(w: u32, i: &Insn, sp_pick: bool) -> Option<u32> {
     let mut w = w;
+    let base_reg: u32 = if sp_pick { 31 } else { 28 };
     match *i {
         Insn::Ld { addr: Addr::Lit { .. }, .. } => {
             return Some(w);
         }
         Insn::Ld { addr, .. } | Insn::St { addr, .. } => {
-            w = (w & !(0x1f << 5)) | (28 << 5);
+            w = (w & !(0x1f << 5)) | (base_reg << 5);
             if let Addr::Reg { .. } = addr {
                 w = (w & !(0x1f << 16)) | (27 << 16);
             }
@@ -472,16 +482,16 @@ fn mem_fix(w: u32, i: &Insn) -> Option<u32> {
             return Some(w);
         }
         Insn::VLd { addr, .. } | Insn::VSt { addr, .. } => {
-            w = (w & !(0x1f << 5)) | (28 << 5);
+            w = (w & !(0x1f << 5)) | (base_reg << 5);
             if let Addr::Reg { .. } = addr {
                 w = (w & !(0x1f << 16)) | (27 << 16);
             }
         }
         Insn::VLdp { .. } | Insn::VStp { .. } => {
-            w = (w & !(0x1f << 5)) | (28 << 5);
+            w = (w & !(0x1f << 5)) | (base_reg << 5);
         }
         Insn::Ldp { .. } | Insn::Stp { .. } | Insn::Ldex { .. } | Insn::Stex { .. } | Insn::Ldar { .. } | Insn::Stlr { .. } | Insn::Atomic { .. } | Insn::Cas { .. } => {
-            w = (w & !(0x1f << 5)) | (28 << 5);
+            w = (w & !(0x1f << 5)) | (base_reg << 5);
         }
         _ => {}
     }
@@ -498,6 +508,10 @@ fn off_ok(i: &Insn) -> bool {
 }
 
 pub fn gen_program(rng: &mut Rng, n: usize) -> Vec<u32> {
+    gen_program_opts(rng, n, &GenOpts { sp_base: false })
+}
+
+pub fn gen_program_opts(rng: &mut Rng, n: usize, opts: &GenOpts) -> Vec<u32> {
     let total: u32 = PATS.iter().map(|p| p.2).sum();
     let mut out: Vec<u32> = Vec::new();
     while out.len() < n {
@@ -540,7 +554,8 @@ pub fn gen_program(rng: &mut Rng, n: usize) -> Vec<u32> {
         if matches!(i, Insn::Unsup(_)) || needs_interp(&i) {
             continue;
         }
-        let w = match mem_fix(w, &i) {
+        let sp_pick = opts.sp_base && rng.below(2) == 0;
+        let w = match mem_fix(w, &i, sp_pick) {
             Some(x) => x,
             None => continue,
         };
@@ -548,7 +563,7 @@ pub fn gen_program(rng: &mut Rng, n: usize) -> Vec<u32> {
         if matches!(i, Insn::Unsup(_)) || needs_interp(&i) || !off_ok(&i) {
             continue;
         }
-        if dests(&i).iter().any(|&d| d == 27 || d == 28) {
+        if dests(&i).iter().any(|&d| d == 27 || d == 28 || (opts.sp_base && d == SP)) {
             continue;
         }
         match i {
@@ -589,6 +604,10 @@ pub fn gen_program(rng: &mut Rng, n: usize) -> Vec<u32> {
 }
 
 pub fn gen_state(rng: &mut Rng) -> (State, Vec<u8>) {
+    gen_state_opts(rng, &GenOpts { sp_base: false })
+}
+
+pub fn gen_state_opts(rng: &mut Rng, opts: &GenOpts) -> (State, Vec<u8>) {
     let mut st = State { x: [0; 31], sp: rng.val(), nzcv: (rng.below(16)) << 28, q: [[0; 16]; 32] };
     for i in 0..32 {
         for h in 0..2 {
@@ -617,6 +636,9 @@ pub fn gen_state(rng: &mut Rng) -> (State, Vec<u8>) {
         st.x[i] = rng.val();
     }
     st.x[27] = rng.below(128);
+    if opts.sp_base {
+        st.sp = BASEREG;
+    }
     st.x[28] = BASEREG;
     let mut win = vec![0u8; WIN_LEN];
     for c in win.chunks_mut(8) {

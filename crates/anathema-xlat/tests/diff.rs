@@ -1,5 +1,5 @@
 use anathema_xlat::oracle::*;
-use anathema_xlat::trans::MemModel;
+use anathema_xlat::trans::{Config, MemModel};
 use std::process::Command;
 
 fn dis(words: &[u32]) -> String {
@@ -15,15 +15,20 @@ fn dis(words: &[u32]) -> String {
 }
 
 fn fuzz(model: MemModel, seed: u64, cases: usize, len: usize) {
+    fuzz_cfg(Config::new(model), seed, cases, len, false)
+}
+
+fn fuzz_cfg(cfg: Config, seed: u64, cases: usize, len: usize, sp_base: bool) {
+    let opts = GenOpts { sp_base };
     let mut oracle = Oracle::new(&format!("/tmp/anx-oracle-{}", seed)).expect("oracle");
-    let mut native = Native::new(model);
+    let mut native = Native::with_cfg(cfg);
     let mut rng = Rng(seed);
     let mut fails = 0;
     let mut skipped = 0;
     for c in 0..cases {
         let n = 1 + rng.below(len as u64) as usize;
-        let prog = gen_program(&mut rng, n);
-        let (st, win) = gen_state(&mut rng);
+        let prog = gen_program_opts(&mut rng, n, &opts);
+        let (st, win) = gen_state_opts(&mut rng, &opts);
         let o = match oracle.run(&st, &win, &prog) {
             Ok(o) => o,
             Err(_) => {
@@ -76,4 +81,21 @@ fn checked() {
 #[ignore]
 fn big() {
     fuzz(MemModel::Identity, 0xfeed_f00d_1, 40000, 20);
+}
+
+fn kernel_cfg(model: MemModel, bias: u64) -> Config {
+    let mut cfg = Config::with_order(model, &[8, 0, 32, 16, 9, 30, 17, 19, 1, 20, 10]);
+    cfg.set_vorder(&[0, 1, 2, 3, 8, 4, 9, 5, 6, 7, 16]);
+    cfg.bias = bias;
+    cfg
+}
+
+#[test]
+fn kernel_pins_sp_base() {
+    fuzz_cfg(kernel_cfg(MemModel::Identity, 0), 0x5151, 4000, 10, true);
+}
+
+#[test]
+fn kernel_pins_biased_offset() {
+    fuzz_cfg(kernel_cfg(MemModel::Biased, 0x1000_0000), 0x6262, 2000, 10, true);
 }

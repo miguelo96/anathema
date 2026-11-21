@@ -467,6 +467,37 @@ impl<'a> Tx<'a> {
         self.zmark(rd, if q { 0 } else { 1 });
     }
 
+    fn nan_fix(&mut self, acc: u8, ft: u8) {
+        self.clobber();
+        self.a.vex(if ft == 0 { 0 } else { 1 }, 1, false, 0, acc, Rm::R(acc), 0x2e);
+        let at = self.a.jcc32(CC_P) as u32;
+        let back = self.a.hot.len() as u32;
+        self.a.in_cold = true;
+        let off = self.a.cold.len() as u32;
+        self.fixes.push(Fix::Cold { at, to: off });
+        if ft == 1 {
+            self.a.vex(1, 1, true, 0, acc, Rm::R(RAX), 0x7e);
+            self.a.mov_ri(RDX, 0xfff8_0000_0000_0000);
+            self.a.alu_rr(Alu::Cmp, true, RAX, RDX);
+            let j = self.a.jcc8(CC_NE);
+            self.a.op(0, true, &[0x0f, 0xba], 6, Rm::R(RAX), false);
+            self.a.b(63);
+            self.a.vex(1, 1, true, 0, acc, Rm::R(RAX), 0x6e);
+            self.a.patch8(j);
+        } else {
+            self.a.vex(1, 1, false, 0, acc, Rm::R(RAX), 0x7e);
+            self.a.alu_ri(Alu::Cmp, false, RAX, 0xffc0_0000u32 as i32);
+            let j = self.a.jcc8(CC_NE);
+            self.a.op(0, false, &[0x0f, 0xba], 6, Rm::R(RAX), false);
+            self.a.b(31);
+            self.a.vex(1, 1, false, 0, acc, Rm::R(RAX), 0x6e);
+            self.a.patch8(j);
+        }
+        let bat = self.a.jmp32() as u32;
+        self.fixes.push(Fix::Hot { at: bat, to: back });
+        self.a.in_cold = false;
+    }
+
     fn fp1(&mut self, ft: u8, op: u8, rd: u8, rn: u8) {
         let acc = if self.vpin(rd).is_some() { self.vdst(rd, X15) } else { X15 };
         match op {
@@ -474,6 +505,7 @@ impl<'a> Tx<'a> {
                 let xm = self.vrm(rn);
                 self.vzero(X13);
                 self.vx(pp_of(ft), 0x51, acc, X13, xm);
+                self.nan_fix(acc, ft);
             }
             _ => {
                 self.clobber();
@@ -522,6 +554,9 @@ impl<'a> Tx<'a> {
         }
         let xm = if xa == xn && rn == rm { Rm::R(xa) } else { xm };
         self.vx(pp_of(ft), opc, xa, xa, xm);
+        if op == 1 {
+            self.nan_fix(xa, ft);
+        }
         self.vcommit(rd, xa);
         self.zmark(rd, if ft == 0 { 2 } else { 1 });
     }

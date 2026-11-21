@@ -152,7 +152,7 @@ impl Runner {
             a.vex(2, 1, false, 0, *x, Rm::M(Mem::b(R15, OFF_Q + *v as i32 * 16 - 128)), 0x6f);
         }
         if self.cfg.mem == MemModel::Biased {
-            a.mov_ri(R14, 0);
+            a.mov_ri(R14, self.cfg.bias);
         }
         a.jmp_rm(Rm::R(RAX));
         self.entry = self.put(&a.hot);
