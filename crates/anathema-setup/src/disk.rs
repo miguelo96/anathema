@@ -443,8 +443,12 @@ pub fn assign_letter(volume: &str) -> Result<char, String> {
 
 pub fn lock_and_dismount(letter: char) -> Result<(), String> {
     let handle = open(&format!(r"\\.\{letter}:"), GENERIC_READ | GENERIC_WRITE)?;
-    ioctl(&handle, FSCTL_LOCK_VOLUME, ptr::null(), 0, ptr::null_mut(), 0)
-        .map_err(|e| format!("cannot lock {letter}: (error {e}), close anything using it"))?;
+    for _ in 0..8 {
+        if ioctl(&handle, FSCTL_LOCK_VOLUME, ptr::null(), 0, ptr::null_mut(), 0).is_ok() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(400));
+    }
     ioctl(&handle, FSCTL_DISMOUNT_VOLUME, ptr::null(), 0, ptr::null_mut(), 0)
         .map_err(|e| format!("cannot dismount {letter}: (error {e})"))?;
     Ok(())
