@@ -3,6 +3,7 @@ use crate::macho::Image;
 use crate::mem::{Ram, RAM_BASE, RAM_SIZE};
 
 pub const KERNEL_PA: u64 = RAM_BASE + 0x0300_4000;
+pub const FB_PA: u64 = RAM_BASE + 0x0900_0000;
 
 pub struct Loaded {
     pub entry_pa: u64,
@@ -97,6 +98,12 @@ pub fn load_kernel(ram: &Ram, img: &Image, data: &[u8], dt_bytes: &[u8], cmdline
     put64(args, 0x10, KERNEL_PA);
     put64(args, 0x18, RAM_SIZE - (KERNEL_PA - RAM_BASE));
     put64(args, 0x20, top);
+    put64(args, 0x28, FB_PA);
+    put64(args, 0x30, 1);
+    put64(args, 0x38, 1920 * 4);
+    put64(args, 0x40, 1920);
+    put64(args, 0x48, 1080);
+    put64(args, 0x50, 32);
     put32(args, 0x58, 0);
     put64(args, 0x60, virt_base + (dt_pa - KERNEL_PA));
     put32(args, 0x68, dt_final.len() as u32);

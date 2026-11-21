@@ -104,6 +104,11 @@ fn main() {
                     print!(" x{}={:#x}", r, ctx.x[r]);
                 }
                 println!(" sp={:#x}", ctx.x[31]);
+                if std::env::var("RT_BPSTK").is_ok() {
+                    for i in 0..10u64 {
+                        println!("   [sp+{:#x}] = {:#x}", i * 8, m.load(ctx.x[31] + i * 8, 8).unwrap_or(0));
+                    }
+                }
                 if std::env::var("RT_BPRING").is_ok() {
                     for p in ring.iter().rev().take(60).collect::<Vec<_>>().into_iter().rev() {
                         print!("{:x} ", p & 0xfffffff);
@@ -184,13 +189,23 @@ fn main() {
             println!("  lr {:#x}", lr);
             if std::env::var("RT_FRAMES").is_ok() {
                 let mut line = String::new();
-                for i in 0..14u64 {
+                for i in 0..std::env::var("RT_WORDS").ok().and_then(|v| v.parse().ok()).unwrap_or(14u64) {
                     line.push_str(&format!("{:#x} ", m.load(fp.wrapping_sub(std::env::var("RT_BELOW").ok().and_then(|v| u64::from_str_radix(&v, 16).ok()).unwrap_or(0x70)) + i * 8, 8).unwrap_or(0)));
                 }
                 println!("    below fp: {}", line);
             }
             fp = match m.load(fp, 8) { Ok(v) => v, Err(_) => break };
             if fp == 0 { break }
+        }
+    }
+    if std::env::var("RT_PAS").is_ok() {
+        let mut a = ctx.x[31];
+        for _ in 0..600 {
+            let v = m.load(a, 8).unwrap_or(0);
+            if (0x7000_0000..0x2_0000_0000).contains(&v) {
+                println!("pa-like {:#x}: {:#x}", a, v);
+            }
+            a += 8;
         }
     }
     {
