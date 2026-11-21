@@ -1,0 +1,12 @@
+[package]
+name = "anathema-rt"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+anathema-xlat = { path = "../anathema-xlat" }
+
+[[bin]]
+name = "rt-boot"
+path = "src/main.rs"

@@ -100,6 +100,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "anathema-rt"
+version = "0.1.0"
+dependencies = [
+ "anathema-xlat",
+]
+
+[[package]]
 name = "anathema-setup"
 version = "0.1.0"
 dependencies = [

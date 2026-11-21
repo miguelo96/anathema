@@ -107,6 +107,12 @@ impl<'a> Fetch for Words<'a> {
     }
 }
 
+pub enum Stop {
+    Interp(u64),
+    Refused(String),
+    Budget,
+}
+
 impl Runner {
     pub fn new(cfg: Config) -> Runner {
         let region = Region::anon(1 << 22);
@@ -200,6 +206,9 @@ impl Runner {
         if let Some((w, n)) = t.refused {
             return Err(format!("refused {:08x} {}", w, n));
         }
+        if t.n_insns == 0 && t.hooked != 0 {
+            return Err(String::from("hook"));
+        }
         let hot_base = self.used;
         let cold_base = hot_base + t.hot.len();
         let (d, i, n) = (self.exit_dispatch, self.exit_indirect, self.exit_interp);
@@ -229,5 +238,23 @@ impl Runner {
             }
         }
         Err("budget".into())
+    }
+
+    pub fn run_until_stop(&mut self, ctx: &mut Ctx, f: &dyn Fetch, budget: usize) -> Stop {
+        for _ in 0..budget {
+            let pc = ctx.pc;
+            let off = match self.compile(f, pc) {
+                Ok(o) => o,
+                Err(e) if e == "hook" => return Stop::Interp(pc),
+                Err(e) => return Stop::Refused(e),
+            };
+            let entry: extern "sysv64" fn(*mut Ctx, *const u8) -> u64 =
+                unsafe { std::mem::transmute(self.region.ptr.add(self.entry)) };
+            let st = entry(ctx as *mut Ctx, unsafe { self.region.ptr.add(off) });
+            if st != 0 {
+                return Stop::Interp(ctx.pc);
+            }
+        }
+        Stop::Budget
     }
 }
