@@ -13,5 +13,11 @@ opt-level = "s"
 lto = true
 codegen-units = 1
 
+[profile.release.package.anathema-rt]
+opt-level = 3
+
+[profile.release.package.anathema-xlat]
+opt-level = 3
+
 [profile.dev]
 panic = "abort"

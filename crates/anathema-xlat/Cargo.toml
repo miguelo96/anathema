@@ -7,6 +7,14 @@ license = "MIT"
 [lib]
 path = "src/lib.rs"
 
+[features]
+default = ["std"]
+std = []
+
+[dependencies]
+hashbrown = { version = "0.15", default-features = false }
+
 [[bin]]
 name = "xlat-bench"
+required-features = ["std"]
 path = "src/bin/xlat-bench.rs"

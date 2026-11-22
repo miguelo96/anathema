@@ -6,8 +6,10 @@ extern crate alloc;
 mod acpi;
 mod bringup;
 mod cpu;
+mod exfat;
 mod gfx;
 mod input;
+mod macboot;
 mod pci;
 mod readiness;
 mod report;
@@ -25,7 +27,7 @@ const ENTRIES: [ui::Entry; 6] = [
     ui::Entry { label: "Hardware report", hint: "memory, acpi, cpu, pci, display", enabled: true },
     ui::Entry { label: "Readiness check", hint: "blockers found on this pc and our plan", enabled: true },
     ui::Entry { label: "Bring-up test", hint: "gdt, idt, paging, apic, smp", enabled: true },
-    ui::Entry { label: "Boot macOS", hint: "not available in this build", enabled: false },
+    ui::Entry { label: "Boot macOS", hint: "experimental: kernel runs, no installer yet", enabled: true },
     ui::Entry { label: "Restart", hint: "reboot the machine", enabled: true },
     ui::Entry { label: "Power off", hint: "shut the machine down", enabled: true },
 ];
@@ -41,6 +43,9 @@ fn main() -> Status {
             return Status::UNSUPPORTED;
         }
     };
+    if macboot::autoboot() {
+        let _ = macboot::run(&mut screen);
+    }
     let subtitle = format!("boot loader {}", ui::VERSION);
     let info = screen.info.clone();
     let (mut report, inventory) = {
@@ -79,6 +84,7 @@ fn main() -> Status {
                     note = String::new();
                 }
                 2 => note = bringup::run(&mut screen, &inventory),
+                3 => note = macboot::run(&mut screen),
                 4 => runtime::reset(ResetType::COLD, Status::SUCCESS, None),
                 5 => runtime::reset(ResetType::SHUTDOWN, Status::SUCCESS, None),
                 _ => note = String::from("macOS boot is not part of this build yet"),

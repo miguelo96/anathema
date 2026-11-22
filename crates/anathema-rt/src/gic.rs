@@ -1,3 +1,4 @@
+use alloc::{boxed::Box, string::{String, ToString}, vec::Vec};
 pub const GIC_BASE: u64 = 0x1000_0000;
 pub const GICD_SIZE: u64 = 0x1_0000;
 pub const GICR_BASE: u64 = 0x1001_0000;
@@ -45,12 +46,12 @@ impl Gic {
             route: vec![0; NINT],
             waker: 0,
             sre: 7,
-            pmr: 0,
+            pmr: 0xff,
             bpr0: 0,
             bpr1: 0,
             ctlr: 0x400,
-            igrpen0: 0,
-            igrpen1: 0,
+            igrpen0: 1,
+            igrpen1: 1,
             ap: [0; 8],
             running: Vec::new(),
             level: [false; 32],

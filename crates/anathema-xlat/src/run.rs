@@ -1,6 +1,8 @@
+use alloc::{boxed::Box, string::{String, ToString}, vec::Vec};
 use crate::trans::*;
 use crate::x86::*;
-use std::collections::HashMap;
+use crate::fx::HashMap;
+
 
 #[repr(C)]
 #[derive(Clone)]
@@ -21,10 +23,14 @@ impl Default for Ctx {
     }
 }
 
+#[cfg(feature = "std")]
 extern "C" {
     fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
     fn munmap(addr: *mut u8, len: usize) -> i32;
 }
+
+#[cfg(not(feature = "std"))]
+pub static ALLOC_EXEC: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 pub struct Region {
     pub ptr: *mut u8,
@@ -32,6 +38,7 @@ pub struct Region {
 }
 
 impl Region {
+    #[cfg(feature = "std")]
     pub fn fixed(addr: usize, len: usize, exec: bool) -> Option<Region> {
         let prot = if exec { 7 } else { 3 };
         let p = unsafe { mmap(addr as *mut u8, len, prot, 0x2 | 0x20 | 0x100000, -1, 0) };
@@ -41,13 +48,25 @@ impl Region {
         Some(Region { ptr: p, len })
     }
 
+    #[cfg(feature = "std")]
     pub fn anon(len: usize) -> Region {
-        let p = unsafe { mmap(std::ptr::null_mut(), len, 7, 0x2 | 0x20, -1, 0) };
+        let p = unsafe { mmap(core::ptr::null_mut(), len, 7, 0x2 | 0x20, -1, 0) };
         assert!(p as isize != -1);
+        Region { ptr: p, len }
+    }
+
+    #[cfg(not(feature = "std"))]
+    pub fn anon(len: usize) -> Region {
+        let f = ALLOC_EXEC.load(core::sync::atomic::Ordering::Relaxed);
+        assert!(f != 0);
+        let f: fn(usize) -> *mut u8 = unsafe { core::mem::transmute(f) };
+        let p = f(len);
+        assert!(!p.is_null());
         Region { ptr: p, len }
     }
 }
 
+#[cfg(feature = "std")]
 impl Drop for Region {
     fn drop(&mut self) {
         unsafe {
@@ -125,7 +144,7 @@ impl Runner {
             exit_indirect: 0,
             exit_interp: 0,
             shared_end: 0,
-            cache: HashMap::new(),
+            cache: HashMap::default(),
         };
         r.build_shared();
         r
@@ -135,7 +154,7 @@ impl Runner {
         let at = self.used;
         assert!(at + bytes.len() < self.region.len);
         unsafe {
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), self.region.ptr.add(at), bytes.len());
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), self.region.ptr.add(at), bytes.len());
         }
         self.used += bytes.len();
         at
@@ -234,7 +253,7 @@ impl Runner {
             }
             let off = self.compile(f, pc)?;
             let entry: extern "sysv64" fn(*mut Ctx, *const u8) -> u64 =
-                unsafe { std::mem::transmute(self.region.ptr.add(self.entry)) };
+                unsafe { core::mem::transmute(self.region.ptr.add(self.entry)) };
             let st = entry(ctx as *mut Ctx, unsafe { self.region.ptr.add(off) });
             if st != 0 {
                 return Err(format!("interp needed at {:x}", ctx.pc));
@@ -252,7 +271,7 @@ impl Runner {
                 Err(e) => return Stop::Refused(e),
             };
             let entry: extern "sysv64" fn(*mut Ctx, *const u8) -> u64 =
-                unsafe { std::mem::transmute(self.region.ptr.add(self.entry)) };
+                unsafe { core::mem::transmute(self.region.ptr.add(self.entry)) };
             let st = entry(ctx as *mut Ctx, unsafe { self.region.ptr.add(off) });
             if st != 0 {
                 return Stop::Interp(ctx.pc);

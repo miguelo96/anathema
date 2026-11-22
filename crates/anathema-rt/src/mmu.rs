@@ -1,3 +1,4 @@
+use alloc::{boxed::Box, string::{String, ToString}, vec::Vec};
 use crate::mem::Ram;
 
 #[derive(Default, Clone)]
@@ -11,6 +12,7 @@ pub struct Mmu {
 pub struct Fault {
     pub va: u64,
     pub level: u32,
+    pub kind: u8,
 }
 
 impl Mmu {
@@ -47,9 +49,9 @@ impl Mmu {
         self.sctlr & 1 != 0
     }
 
-    pub fn translate(&self, ram: &Ram, va: u64) -> Result<u64, Fault> {
+    pub fn translate(&self, ram: &Ram, va: u64) -> Result<(u64, u8), Fault> {
         if !self.enabled() {
-            return Ok(va);
+            return Ok((va, 0x0b));
         }
         let upper = (va >> 55) & 1 == 1;
         let (tsz, tg, ttbr) = if upper {
@@ -73,27 +75,40 @@ impl Mmu {
             let idx = (va >> shift) & ((1u64 << idx_bits) - 1);
             let at = table + idx * 8;
             if !ram.contains(at, 8) {
-                return Err(Fault { va, level });
+                return Err(Fault { va, level, kind: 0 });
             }
             let desc = ram.read(at, 8);
             if desc & 1 == 0 {
-                return Err(Fault { va, level });
+                return Err(Fault { va, level, kind: 0 });
             }
             let is_table = desc & 2 != 0;
+            let leaf_flags = |desc: u64, level: u32| -> u8 {
+                let user = ((desc >> 6) & 1) as u8;
+                let ro = ((desc >> 7) & 1) as u8;
+                let uxn = ((desc >> 54) & 1) as u8;
+                let pxn = ((desc >> 53) & 1) as u8;
+                user | (ro << 1) | (uxn << 2) | (pxn << 3) | ((level as u8) << 4)
+            };
             if level == 3 {
                 if !is_table {
-                    return Err(Fault { va, level });
+                    return Err(Fault { va, level, kind: 0 });
+                }
+                if desc & (1 << 10) == 0 {
+                    return Err(Fault { va, level, kind: 1 });
                 }
                 let mask = !((1u64 << grain_shift) - 1) & 0x0000_ffff_ffff_ffff;
-                return Ok((desc & mask) | (va & ((1u64 << grain_shift) - 1)));
+                return Ok(((desc & mask) | (va & ((1u64 << grain_shift) - 1)), leaf_flags(desc, level)));
             }
             if !is_table {
+                if desc & (1 << 10) == 0 {
+                    return Err(Fault { va, level, kind: 1 });
+                }
                 let mask = !((1u64 << shift) - 1) & 0x0000_ffff_ffff_ffff;
-                return Ok((desc & mask) | (va & ((1u64 << shift) - 1)));
+                return Ok(((desc & mask) | (va & ((1u64 << shift) - 1)), leaf_flags(desc, level)));
             }
             table = desc & 0x0000_ffff_ffff_ffff & !((1u64 << grain_shift) - 1);
             shift -= bits_per_level;
         }
-        Err(Fault { va, level: 3 })
+        Err(Fault { va, level: 3, kind: 0 })
     }
 }

@@ -1,3 +1,4 @@
+use alloc::{boxed::Box, string::{String, ToString}, vec::Vec};
 pub struct Seg {
     pub name: String,
     pub vm: u64,

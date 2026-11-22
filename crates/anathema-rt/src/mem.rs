@@ -1,5 +1,6 @@
+use alloc::{boxed::Box, string::{String, ToString}, vec::Vec};
 use anathema_xlat::run::Region;
-use std::collections::HashMap;
+use anathema_xlat::fx::HashMap;
 
 pub const RAM_BASE: u64 = 0x7000_0000;
 pub const RAM_SIZE: u64 = 0x1_0000_0000;
@@ -7,13 +8,23 @@ pub const RAM_SIZE: u64 = 0x1_0000_0000;
 pub struct Ram {
     pub base: u64,
     pub len: u64,
-    _region: Region,
+    host: *mut u8,
+    _region: Option<Region>,
 }
 
 impl Ram {
+    #[cfg(feature = "std")]
     pub fn new(base: u64, len: u64) -> Ram {
-        let region = Region::fixed(base as usize, len as usize, false).expect("map guest ram");
-        Ram { base, len, _region: region }
+        let region = Region::anon(len as usize);
+        Ram { base, len, host: region.ptr, _region: Some(region) }
+    }
+
+    pub unsafe fn from_raw(base: u64, len: u64, host: *mut u8) -> Ram {
+        Ram { base, len, host, _region: None }
+    }
+
+    fn p(&self, pa: u64) -> *mut u8 {
+        unsafe { self.host.add(pa.wrapping_sub(self.base) as usize) }
     }
 
     pub fn contains(&self, pa: u64, n: u64) -> bool {
@@ -21,7 +32,7 @@ impl Ram {
     }
 
     pub fn read(&self, pa: u64, size: usize) -> u64 {
-        let p = pa as *const u8;
+        let p = self.p(pa) as *const u8;
         unsafe {
             match size {
                 1 => *p as u64,
@@ -33,7 +44,7 @@ impl Ram {
     }
 
     pub fn write(&self, pa: u64, size: usize, v: u64) {
-        let p = pa as *mut u8;
+        let p = self.p(pa);
         unsafe {
             match size {
                 1 => *p = v as u8,
@@ -45,7 +56,7 @@ impl Ram {
     }
 
     pub fn bytes(&self, pa: u64, len: usize) -> &mut [u8] {
-        unsafe { std::slice::from_raw_parts_mut(pa as *mut u8, len) }
+        unsafe { core::slice::from_raw_parts_mut(self.p(pa), len) }
     }
 }
 
@@ -58,15 +69,25 @@ pub struct Bus {
     pub uart: String,
     regs: HashMap<u64, u64>,
     pub log_budget: usize,
+    pub cur_pc: u64,
+    pub gfx_kick: bool,
+    pub gfx_log: usize,
     pub seen: HashMap<u64, usize>,
 }
 
 impl Bus {
     pub fn new() -> Bus {
-        Bus { gic: crate::gic::Gic::new(), fb: vec![0u8; FB_BYTES], uart: String::new(), regs: HashMap::new(), log_budget: 300, seen: HashMap::new() }
+        Bus { gic: crate::gic::Gic::new(), fb: vec![0u8; FB_BYTES], uart: String::new(), regs: HashMap::default(), log_budget: 300, cur_pc: 0, gfx_kick: false, gfx_log: 400, seen: HashMap::default() }
     }
 
     fn note(&mut self, kind: &str, pa: u64, size: usize, v: u64) {
+        if (0x2001_0000..0x2001_1000).contains(&pa) {
+            return;
+        }
+        if (0x3020_0000..0x3022_0000).contains(&pa) && self.gfx_log > 0 {
+            self.gfx_log -= 1;
+            println!("  gfx {} {:#x} size {} = {:#x} pc {:#x}", kind, pa, size, v, self.cur_pc);
+        }
         let region = pa & !0xffff;
         let n = self.seen.entry(region).or_insert(0);
         *n += 1;
@@ -111,7 +132,14 @@ impl Bus {
         v
     }
 
+    pub fn reg(&self, pa: u64) -> u64 {
+        self.regs.get(&pa).copied().unwrap_or(0)
+    }
+
     pub fn write(&mut self, pa: u64, size: usize, v: u64) {
+        if pa == 0x3020_1008 {
+            self.gfx_kick = true;
+        }
         if pa >= FB_BASE && pa + size as u64 <= FB_BASE + FB_BYTES as u64 {
             let o = (pa - FB_BASE) as usize;
             self.fb[o..o + size].copy_from_slice(&v.to_le_bytes()[..size]);

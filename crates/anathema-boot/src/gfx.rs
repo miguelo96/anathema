@@ -114,6 +114,35 @@ impl Screen {
         });
     }
 
+    pub fn blit_guest(&mut self, fb: &[u8], gw: usize, gh: usize, top: usize) {
+        let avail_h = self.h.saturating_sub(top);
+        let (dw, dh) = if self.w >= gw && avail_h >= gh {
+            (gw, gh)
+        } else {
+            let by_w = (self.w, gh * self.w / gw);
+            let by_h = (gw * avail_h / gh, avail_h);
+            if by_w.1 <= avail_h { by_w } else { by_h }
+        };
+        let ox = (self.w - dw) / 2;
+        for y in 0..dh {
+            let sy = y * gh / dh;
+            let row = &fb[sy * gw * 4..(sy + 1) * gw * 4];
+            let out = (top + y) * self.w + ox;
+            if dw == gw {
+                for x in 0..dw {
+                    let b = &row[x * 4..x * 4 + 4];
+                    self.buf[out + x] = BltPixel::new(b[2], b[1], b[0]);
+                }
+            } else {
+                for x in 0..dw {
+                    let sx = x * gw / dw;
+                    let b = &row[sx * 4..sx * 4 + 4];
+                    self.buf[out + x] = BltPixel::new(b[2], b[1], b[0]);
+                }
+            }
+        }
+    }
+
     pub fn fill(&mut self, x: usize, y: usize, w: usize, h: usize, colour: u32) {
         let p = pixel(colour);
         let right = (x + w).min(self.w);

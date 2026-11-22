@@ -4,9 +4,18 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 
+[features]
+default = ["std"]
+std = ["anathema-xlat/std"]
+
 [dependencies]
-anathema-xlat = { path = "../anathema-xlat" }
+anathema-xlat = { path = "../anathema-xlat", default-features = false }
+
+[lib]
+name = "anathema_rt"
+path = "src/lib.rs"
 
 [[bin]]
 name = "rt-boot"
 path = "src/main.rs"
+required-features = ["std"]

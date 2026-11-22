@@ -1,3 +1,4 @@
+use alloc::{boxed::Box, string::{String, ToString}, vec::Vec};
 use anathema_xlat::run::Ctx;
 
 type V = [u8; 16];
@@ -30,6 +31,12 @@ fn field(w: u32, hi: u32, lo: u32) -> u32 {
 }
 
 pub fn fallback(ctx: &mut Ctx, w: u32) -> bool {
+    if w & 0x9f20_0400 == 0x0e20_0400 && pairwise3(ctx, w) {
+        return true;
+    }
+    if w & 0x9f3e_0c00 == 0x0e20_0800 && pairwise_long(ctx, w) {
+        return true;
+    }
     if w >> 24 == 0xce && sha3(ctx, w) {
         return true;
     }
@@ -774,9 +781,12 @@ fn unl(l: [u32; 4]) -> V {
 }
 
 fn sboxes() -> &'static ([u8; 256], [u8; 256]) {
-    use std::sync::OnceLock;
-    static T: OnceLock<([u8; 256], [u8; 256])> = OnceLock::new();
-    T.get_or_init(|| {
+    static mut T: Option<([u8; 256], [u8; 256])> = None;
+    let cell = unsafe { &mut *core::ptr::addr_of_mut!(T) };
+    if cell.is_some() {
+        return cell.as_ref().unwrap();
+    }
+    let built = (|| {
         let mut sb = [0u8; 256];
         let mut inv = [0u8; 256];
         let mut p: u8 = 1;
@@ -800,7 +810,9 @@ fn sboxes() -> &'static ([u8; 256], [u8; 256]) {
             inv[sb[i] as usize] = i as u8;
         }
         (sb, inv)
-    })
+    })();
+    *cell = Some(built);
+    cell.as_ref().unwrap()
 }
 
 fn gmul(mut a: u8, mut b: u8) -> u8 {
@@ -1131,5 +1143,85 @@ fn sha3(ctx: &mut Ctx, w: u32) -> bool {
         return false;
     }
     ctx.q[rd] = o;
+    true
+}
+
+fn pairwise_long(ctx: &mut Ctx, w: u32) -> bool {
+    let q = field(w, 30, 30) == 1;
+    let u = field(w, 29, 29) == 1;
+    let size = field(w, 23, 22) as usize;
+    let opcode = field(w, 16, 12);
+    let rn = field(w, 9, 5) as usize;
+    let rd = field(w, 4, 0) as usize;
+    if (opcode != 2 && opcode != 6) || size == 3 {
+        return false;
+    }
+    let e = 1usize << size;
+    let we = e * 2;
+    let lanes = (if q { 16 } else { 8 }) / e;
+    let n = ctx.q[rn];
+    let d = ctx.q[rd];
+    let wm = mk(we);
+    let mut out = [0u8; 16];
+    for i in 0..lanes / 2 {
+        let a = rl(&n, e, 2 * i);
+        let b = rl(&n, e, 2 * i + 1);
+        let sum: i128 = if u { a as i128 + b as i128 } else { sx(a, e) as i128 + sx(b, e) as i128 };
+        let mut v = (sum as u64) & wm;
+        if opcode == 6 {
+            v = v.wrapping_add(rl(&d, we, i)) & wm;
+        }
+        wl(&mut out, we, i, v);
+    }
+    ctx.q[rd] = out;
+    true
+}
+
+fn pairwise3(ctx: &mut Ctx, w: u32) -> bool {
+    let q = field(w, 30, 30) == 1;
+    let u = field(w, 29, 29) == 1;
+    let size = field(w, 23, 22) as usize;
+    let rm = field(w, 20, 16) as usize;
+    let opcode = field(w, 15, 11);
+    let rn = field(w, 9, 5) as usize;
+    let rd = field(w, 4, 0) as usize;
+    let ok = (opcode == 0x17 && !u) || opcode == 0x14 || opcode == 0x15;
+    if !ok || (size == 3 && (!q || opcode != 0x17)) {
+        return false;
+    }
+    let e = 1usize << size;
+    let lanes = (if q { 16 } else { 8 }) / e;
+    let n = ctx.q[rn];
+    let m = ctx.q[rm];
+    let wm = mk(e);
+    let mut out = [0u8; 16];
+    for i in 0..lanes {
+        let (src, j) = if i < lanes / 2 { (&n, 2 * i) } else { (&m, 2 * (i - lanes / 2)) };
+        let a = rl(src, e, j);
+        let b = rl(src, e, j + 1);
+        let r = match opcode {
+            0x17 => a.wrapping_add(b) & wm,
+            0x14 => {
+                if u {
+                    a.max(b)
+                } else if sx(a, e) >= sx(b, e) {
+                    a
+                } else {
+                    b
+                }
+            }
+            _ => {
+                if u {
+                    a.min(b)
+                } else if sx(a, e) <= sx(b, e) {
+                    a
+                } else {
+                    b
+                }
+            }
+        };
+        wl(&mut out, e, i, r);
+    }
+    ctx.q[rd] = out;
     true
 }

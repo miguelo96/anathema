@@ -1,6 +1,7 @@
+use alloc::{boxed::Box, string::{String, ToString}, vec::Vec};
 use crate::dt;
 use crate::macho::Image;
-use crate::mem::{Ram, RAM_BASE, RAM_SIZE};
+use crate::mem::{Ram, RAM_BASE};
 
 pub const KERNEL_PA: u64 = RAM_BASE + 0x0300_4000;
 pub const FB_PA: u64 = 0x6000_0000;
@@ -15,7 +16,7 @@ fn align(v: u64, a: u64) -> u64 {
     (v + a - 1) & !(a - 1)
 }
 
-pub fn load_kernel(ram: &Ram, img: &Image, data: &[u8], dt_bytes: &[u8], cmdline: &str) -> Loaded {
+pub fn load_kernel(ram: &Ram, img: &Image, data: &[u8], dt_bytes: &[u8], cmdline: &str, ramdisk: Option<&[u8]>) -> Loaded {
     let virt_base = img.lo();
     let span = img.hi() - virt_base;
     for s in &img.segs {
@@ -62,10 +63,10 @@ pub fn load_kernel(ram: &Ram, img: &Image, data: &[u8], dt_bytes: &[u8], cmdline
     if let Some(mem) = root.child_mut("memory") {
         let mut v = Vec::new();
         v.extend_from_slice(&RAM_BASE.to_le_bytes());
-        v.extend_from_slice(&RAM_SIZE.to_le_bytes());
+        v.extend_from_slice(&ram.len.to_le_bytes());
         mem.set("reg", v);
     }
-    if std::env::var("RT_KEEPGFX").is_err() {
+    if crate::sys::var("RT_KEEPGFX").is_err() {
         if let Some(io) = root.child_mut("arm-io") {
             io.children.retain(|c| {
                 let n = c.name();
@@ -93,18 +94,42 @@ pub fn load_kernel(ram: &Ram, img: &Image, data: &[u8], dt_bytes: &[u8], cmdline
         b.push(0);
         chosen.set("boot-args", b);
         chosen.set("kaslr-seed", vec![0u8; 8]);
+        chosen.set("debug-enabled", 1u32.to_le_bytes().to_vec());
+        chosen.set("development-cert", 1u32.to_le_bytes().to_vec());
         chosen.set("nvram-proxy-data", nvram_image(0x2000));
         chosen.set("nvram-bank-size", 0x2000u32.to_le_bytes().to_vec());
         chosen.set("nvram-bank-count", 2u32.to_le_bytes().to_vec());
         chosen.set("nvram-current-bank", 0u32.to_le_bytes().to_vec());
         chosen.set("dram-base", RAM_BASE.to_le_bytes().to_vec());
-        chosen.set("dram-size", RAM_SIZE.to_le_bytes().to_vec());
+        chosen.set("dram-size", ram.len.to_le_bytes().to_vec());
+    }
+    if ramdisk.is_some() {
+        if let Some(chosen) = root.child_mut("chosen") {
+            if let Some(mm) = chosen.child_mut("memory-map") {
+                mm.set("RAMDisk", vec![0u8; 16]);
+            }
+        }
+    }
+    let dt_probe = dt::serialize(&root);
+    let dt_pa = align(KERNEL_PA + span, 0x4000);
+    let args_pa = align(dt_pa + dt_probe.len() as u64, 0x4000);
+    let mut top = align(args_pa + 0x4000, 0x4000);
+    if let Some(rd) = ramdisk {
+        let rd_pa = top;
+        let mut v = Vec::new();
+        v.extend_from_slice(&rd_pa.to_le_bytes());
+        v.extend_from_slice(&(rd.len() as u64).to_le_bytes());
+        if let Some(chosen) = root.child_mut("chosen") {
+            if let Some(mm) = chosen.child_mut("memory-map") {
+                mm.set("RAMDisk", v);
+            }
+        }
+        ram.bytes(rd_pa, rd.len()).copy_from_slice(rd);
+        top = align(rd_pa + rd.len() as u64, 0x4000);
+        println!("ramdisk at {:#x}, {} bytes", rd_pa, rd.len());
     }
     let dt_final = dt::serialize(&root);
-    let dt_pa = align(KERNEL_PA + span, 0x4000);
     ram.bytes(dt_pa, dt_final.len()).copy_from_slice(&dt_final);
-    let args_pa = align(dt_pa + dt_final.len() as u64, 0x4000);
-    let top = align(args_pa + 0x4000, 0x4000);
     let args = ram.bytes(args_pa, 0x800);
     args.fill(0);
     let put16 = |a: &mut [u8], o: usize, v: u16| a[o..o + 2].copy_from_slice(&v.to_le_bytes());
@@ -114,11 +139,11 @@ pub fn load_kernel(ram: &Ram, img: &Image, data: &[u8], dt_bytes: &[u8], cmdline
     put16(args, 2, 2);
     put64(args, 8, virt_base);
     put64(args, 0x10, KERNEL_PA);
-    put64(args, 0x18, RAM_SIZE - (KERNEL_PA - RAM_BASE));
+    put64(args, 0x18, ram.len - (KERNEL_PA - RAM_BASE));
     put64(args, 0x20, top);
-    let video = std::env::var("RT_VIDEO").is_ok();
+    let video = crate::sys::var("RT_VIDEO").is_ok();
     put64(args, 0x28, if video { FB_PA } else { 0 });
-    put64(args, 0x30, if video { std::env::var("RT_VDISP").ok().and_then(|v| v.parse().ok()).unwrap_or(1) } else { 0 });
+    put64(args, 0x30, if video { crate::sys::var("RT_VDISP").ok().and_then(|v| v.parse().ok()).unwrap_or(1) } else { 0 });
     put64(args, 0x38, if video { 1920 * 4 } else { 0 });
     put64(args, 0x40, if video { 1920 } else { 0 });
     put64(args, 0x48, if video { 1080 } else { 0 });
@@ -127,9 +152,9 @@ pub fn load_kernel(ram: &Ram, img: &Image, data: &[u8], dt_bytes: &[u8], cmdline
     put64(args, 0x60, virt_base + (dt_pa - KERNEL_PA));
     put32(args, 0x68, dt_final.len() as u32);
     let cl = cmdline.as_bytes();
-    args[0x70..0x70 + cl.len().min(1023)].copy_from_slice(&cl[..cl.len().min(1023)]);
+    args[0x6c..0x6c + cl.len().min(1023)].copy_from_slice(&cl[..cl.len().min(1023)]);
     put64(args, 0x470, 0);
-    put64(args, 0x478, RAM_SIZE);
+    put64(args, 0x478, ram.len);
     println!("devicetree at {:#x} ({} bytes), boot args at {:#x}, top of kernel data {:#x}", dt_pa, dt_final.len(), args_pa, top);
     Loaded { entry_pa: KERNEL_PA + (img.entry - virt_base), args_pa, virt_base }
 }

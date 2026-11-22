@@ -1,4 +1,7 @@
 mod boot;
+mod sys;
+#[macro_use]
+extern crate alloc;
 mod fbcheck;
 mod gic;
 mod dt;
@@ -6,6 +9,7 @@ mod machine;
 mod macho;
 mod mem;
 mod mmu;
+mod pci;
 mod simd;
 
 use anathema_xlat::run::{Ctx, Runner, Stop};
@@ -46,6 +50,38 @@ fn install_segv() {
     }
 }
 
+struct FileDisk {
+    f: std::fs::File,
+    sectors: u64,
+}
+
+impl pci::Disk for FileDisk {
+    fn sectors(&self) -> u64 {
+        self.sectors
+    }
+
+    fn read(&mut self, sector: u64, out: &mut [u8]) -> bool {
+        use std::io::{Read, Seek, SeekFrom};
+        if self.f.seek(SeekFrom::Start(sector * 512)).is_err() {
+            return false;
+        }
+        let mut done = 0;
+        while done < out.len() {
+            match self.f.read(&mut out[done..]) {
+                Ok(0) => {
+                    for b in out[done..].iter_mut() {
+                        *b = 0;
+                    }
+                    break;
+                }
+                Ok(n) => done += n,
+                Err(_) => return false,
+            }
+        }
+        true
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(|s| s.as_str()) == Some("fbcheck") {
@@ -74,8 +110,14 @@ fn main() {
     let img = macho::parse(&kdata);
     let dtb = std::fs::read(&dpath).expect("read devicetree");
     let ram = Ram::new(RAM_BASE, RAM_SIZE);
-    let loaded = boot::load_kernel(&ram, &img, &kdata, &dtb, &cmdline);
+    let rdisk = std::env::var("RT_RAMDISK").ok().map(|p| std::fs::read(p).expect("read ramdisk"));
+    let loaded = boot::load_kernel(&ram, &img, &kdata, &dtb, &cmdline, rdisk.as_deref());
     let mut m = Machine::new(ram);
+    if let Ok(path) = std::env::var("RT_DISK") {
+        let f = std::fs::File::open(&path).expect("open disk");
+        let sectors = f.metadata().map(|m| m.len() / 512).unwrap_or(0);
+        m.pci.disk = Some(pci::Overlay::new(Box::new(FileDisk { f, sectors })));
+    }
     m.trace_budget = trace;
     install_segv();
     let mut ctx = Box::new(Ctx::default());
@@ -165,8 +207,10 @@ fn main() {
                     Step::Stop(r) => break r,
                 }
                 if flush {
-                    for r in runners.values_mut() {
-                        r.reset_cache();
+                    for (k, r) in runners.iter_mut() {
+                        if *k < (1u64 << 33) {
+                            r.reset_cache();
+                        }
                     }
                 }
             }
@@ -181,6 +225,25 @@ fn main() {
         }
     }
     println!("stopped: {}", reason);
+    if let Ok(spec) = std::env::var("RT_DUMPPA") {
+        for part in spec.split(',') {
+            let mut it = part.split(':');
+            let pa = u64::from_str_radix(it.next().unwrap_or("0"), 16).unwrap_or(0);
+            let len: usize = it.next().and_then(|v| v.parse().ok()).unwrap_or(64);
+            println!("dump pa {:#x}:", pa);
+            let mut o = 0;
+            while o < len {
+                if m.ram.contains(pa + o as u64, 4) {
+                    print!("{:08x} ", m.ram.read(pa + o as u64, 4));
+                }
+                o += 4;
+                if o % 32 == 0 {
+                    println!();
+                }
+            }
+            println!();
+        }
+    }
     if std::env::var("RT_MSGBUF").is_ok() {
         let mut pa = RAM_BASE;
         let end = RAM_BASE + RAM_SIZE;
@@ -205,7 +268,7 @@ fn main() {
         let n: usize = std::env::var("RT_HIST").ok().and_then(|v| v.parse().ok()).unwrap_or(100);
         println!("last steps:");
         for k in (0..n).rev() {
-            let e = m.events.wrapping_sub(k) & 511;
+            let e = m.events.wrapping_sub(k) & 4095;
             let (pc, w) = m.hist[e];
             println!("  {:#x} {:08x}", pc, w);
         }

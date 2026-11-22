@@ -7,3 +7,5 @@ license = "MIT"
 [dependencies]
 uefi = { version = "0.35", features = ["alloc", "global_allocator", "panic_handler"] }
 font8x8 = { version = "0.3", default-features = false }
+anathema-rt = { path = "../anathema-rt", default-features = false }
+anathema-xlat = { path = "../anathema-xlat", default-features = false }

@@ -75,6 +75,8 @@ dependencies = [
 name = "anathema-boot"
 version = "0.1.0"
 dependencies = [
+ "anathema-rt",
+ "anathema-xlat",
  "font8x8",
  "uefi",
 ]
@@ -117,6 +119,9 @@ dependencies = [
 [[package]]
 name = "anathema-xlat"
 version = "0.1.0"
+dependencies = [
+ "hashbrown 0.15.5",
+]
 
 [[package]]
 name = "android-activity"
@@ -1137,6 +1142,12 @@ dependencies = [
 
 [[package]]
 name = "hashbrown"
+version = "0.15.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
+
+[[package]]
+name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
@@ -1424,7 +1435,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cc4e190f5d26ca7051642629da2c52fc03bde85a03197c99408dcd291734c855"
 dependencies = [
  "equivalent",
- "hashbrown",
+ "hashbrown 0.17.1",
 ]
 
 [[package]]

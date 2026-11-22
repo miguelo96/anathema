@@ -1,10 +1,10 @@
+use alloc::{boxed::Box, string::{String, ToString}, vec::Vec};
 use crate::mem::{Bus, Ram};
 use crate::mmu::Mmu;
 use anathema_xlat::decode::{decode, Addr, AtomOp, Ext, ExcKind, Insn, Mode, ZR};
 use anathema_xlat::run::Ctx;
 use anathema_xlat::trans::{sysreg_id, Fetch};
-use std::collections::HashMap;
-use std::time::Instant;
+use anathema_xlat::fx::HashMap;
 
 pub struct Machine {
     pub ram: Ram,
@@ -12,9 +12,15 @@ pub struct Machine {
     pub mmu: Mmu,
     pub sys: HashMap<u16, u64>,
     pub counts: HashMap<String, usize>,
-    pub started: Instant,
+    pub started: u64,
     pub events: usize,
     pub skip: u64,
+    pub excl: Option<u64>,
+    pub rwatch: Vec<(u64, u64)>,
+    pub rwatch_budget: usize,
+    pub stop_idle: bool,
+    pub wfe_count: u64,
+    pub pci: crate::pci::Pci,
     pub max_events: usize,
     pub hist: Vec<(u64, u32)>,
     pub no_irq: bool,
@@ -39,7 +45,8 @@ pub struct Machine {
     pub cur_pc: u64,
     pub from: usize,
     pub daif: u64,
-    tlb: HashMap<u64, u64>,
+    tlb: HashMap<u64, (u64, u8)>,
+    pub el0: bool,
 }
 
 pub enum Step {
@@ -100,9 +107,10 @@ fn sext_to(v: u64, size: usize, bits64: bool) -> u64 {
 
 impl Machine {
     pub fn new(ram: Ram) -> Machine {
-        let mut sys = HashMap::new();
+        let mut sys = HashMap::default();
         sys.insert(sysreg_id(3, 0, 4, 2, 2), 0x4);
         sys.insert(sysreg_id(3, 0, 0, 0, 0), 0x612f_0000);
+        sys.insert(sysreg_id(3, 3, 0, 0, 1), 0x8444_c004);
         sys.insert(sysreg_id(3, 0, 0, 0, 5), 0x8000_0000);
         sys.insert(sysreg_id(3, 3, 14, 0, 0), 24_000_000);
         sys.insert(sysreg_id(3, 3, 0, 0, 7), 4);
@@ -111,53 +119,86 @@ impl Machine {
             bus: Bus::new(),
             mmu: Mmu::default(),
             sys,
-            counts: HashMap::new(),
-            started: Instant::now(),
+            counts: HashMap::default(),
+            started: crate::sys::nanos(),
             events: 0,
             skip: 0,
-            max_events: std::env::var("RT_MAXSTEPS").ok().and_then(|v| v.parse().ok()).unwrap_or(usize::MAX),
-            hist: vec![(0, 0); 512],
-            no_irq: std::env::var("RT_NOIRQ").is_ok(),
+            excl: None,
+            rwatch: crate::sys::var("RT_RDWATCH").map(|v| v.split(',').filter_map(|p| { let mut it = p.split(':'); let a = u64::from_str_radix(it.next()?, 16).ok()?; let l = u64::from_str_radix(it.next()?, 16).ok()?; Some((a, l)) }).collect()).unwrap_or_default(),
+            rwatch_budget: 200,
+            stop_idle: crate::sys::var("RT_STOPIDLE").is_ok(),
+            wfe_count: 0,
+            pci: crate::pci::Pci::new(),
+            max_events: crate::sys::var("RT_MAXSTEPS").ok().and_then(|v| v.parse().ok()).unwrap_or(usize::MAX),
+            hist: vec![(0, 0); 4096],
+            no_irq: crate::sys::var("RT_NOIRQ").is_ok(),
             irq_taken: 0,
             tm: [1, u64::MAX, 0, u64::MAX],
             irq_force: false,
             trace_budget: 400,
             flush: false,
-            elog: std::env::var("RT_ELOG").is_ok(),
+            elog: crate::sys::var("RT_ELOG").is_ok(),
             last_write: false,
             pan: 0,
             spsel: 1,
             sp_el1: 0,
-            say_exc: std::env::var("RT_EXC").is_ok(),
+            say_exc: crate::sys::var("RT_EXC").is_ok(),
             exc_count: 0,
             last_exc: (0, 0, 0),
-            watch_len: std::env::var("RT_WATCHLEN").ok().and_then(|v| v.parse().ok()).unwrap_or(1),
+            watch_len: crate::sys::var("RT_WATCHLEN").ok().and_then(|v| v.parse().ok()).unwrap_or(1),
             watch_hits: 0,
-            watch_pa: std::env::var("RT_WATCHPA").ok().and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok()).unwrap_or(0),
-            watch: std::env::var("RT_WATCH").ok().and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok()).unwrap_or(0),
+            watch_pa: crate::sys::var("RT_WATCHPA").ok().and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok()).unwrap_or(0),
+            watch: crate::sys::var("RT_WATCH").ok().and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok()).unwrap_or(0),
             cur_pc: 0,
             hit: false,
-            from: std::env::var("RT_FROM").ok().and_then(|v| v.parse().ok()).unwrap_or(usize::MAX),
+            from: crate::sys::var("RT_FROM").ok().and_then(|v| v.parse().ok()).unwrap_or(usize::MAX),
             daif: 0x3c0,
-            tlb: HashMap::new(),
+            tlb: HashMap::default(),
+            el0: false,
         }
     }
 
     pub fn translate(&mut self, va: u64) -> Result<u64, String> {
+        self.translate_acc(va, 0)
+    }
+
+    pub fn translate_acc(&mut self, va: u64, acc: u8) -> Result<u64, String> {
         if !self.mmu.enabled() {
             return Ok(va);
         }
         let page = va & !0x3fff;
-        if let Some(pa) = self.tlb.get(&page) {
-            return Ok(pa | (va & 0x3fff));
-        }
-        match self.mmu.translate(&self.ram, va) {
-            Ok(pa) => {
-                self.tlb.insert(page, pa & !0x3fff);
-                Ok(pa)
+        let (pa, flags) = if let Some((pa, fl)) = self.tlb.get(&page) {
+            (*pa | (va & 0x3fff), *fl)
+        } else {
+            match self.mmu.translate(&self.ram, va) {
+                Ok((pa, fl)) => {
+                    self.tlb.insert(page, (pa & !0x3fff, fl));
+                    (pa, fl)
+                }
+                Err(f) => {
+                    let name = if f.kind == 1 { "access flag fault" } else { "translation fault" };
+                    return Err(format!("{} at {:#x} (level {})", name, f.va, f.level));
+                }
             }
-            Err(f) => Err(format!("translation fault at {:#x} (level {})", f.va, f.level)),
+        };
+        let denied = |flags: u8, el0: bool| (el0 && flags & 1 == 0) || (acc == 1 && flags & 2 != 0) || (acc == 2 && el0 && flags & 4 != 0);
+        if denied(flags, self.el0) {
+            self.tlb.remove(&page);
+            match self.mmu.translate(&self.ram, va) {
+                Ok((pa2, fl2)) => {
+                    self.tlb.insert(page, (pa2 & !0x3fff, fl2));
+                    if denied(fl2, self.el0) {
+                        return Err(format!("permission fault at {:#x} (level {})", va, (fl2 >> 4) & 3));
+                    }
+                    return Ok(pa2);
+                }
+                Err(f) => {
+                    let name = if f.kind == 1 { "access flag fault" } else { "translation fault" };
+                    return Err(format!("{} at {:#x} (level {})", name, f.va, f.level));
+                }
+            }
         }
+        Ok(pa)
     }
 
     pub fn flush_tlb(&mut self) {
@@ -170,9 +211,25 @@ impl Machine {
         if size == 16 {
             return Err("wide load".into());
         }
-        let pa = self.translate(va)?;
+        let pa = self.translate_acc(va, 0)?;
+        if self.rwatch_budget > 0 && !self.rwatch.is_empty() {
+            for (a, l) in self.rwatch.clone() {
+                if pa >= a && pa < a + l {
+                    self.rwatch_budget -= 1;
+                    println!("RDWATCH pa {:#x} va {:#x} size {} pc {:#x} event {}", pa, va, size, self.cur_pc, self.events);
+                    break;
+                }
+            }
+        }
         if self.ram.contains(pa, size as u64) {
             Ok(self.ram.read(pa, size))
+        } else if pa < self.ram.base && self.pci.claims(pa) {
+            if pa >= crate::pci::ECAM_BASE && pa < crate::pci::ECAM_BASE + crate::pci::ECAM_SIZE {
+                Ok(self.pci.ecam_read(pa - crate::pci::ECAM_BASE, size))
+            } else {
+                let b = self.pci.bar_base();
+                Ok(self.pci.bar_read(pa - b, size))
+            }
         } else if pa < self.ram.base {
             Ok(self.bus.read(pa, size))
         } else {
@@ -186,7 +243,7 @@ impl Machine {
             self.hit = true;
             println!("WATCH write {:#x} size {} value {:#x} at pc {:#x} (event {})", va, size, v, self.cur_pc, self.events);
         }
-        let pa = self.translate(va)?;
+        let pa = self.translate_acc(va, 1)?;
         if self.watch_pa != 0 && pa + size as u64 > self.watch_pa && pa < self.watch_pa + self.watch_len {
             self.watch_hits += 1;
             if self.watch_hits <= 12 {
@@ -196,6 +253,14 @@ impl Machine {
         if self.ram.contains(pa, size as u64) {
             self.ram.write(pa, size, v);
             Ok(())
+        } else if pa < self.ram.base && self.pci.claims(pa) {
+            if pa >= crate::pci::ECAM_BASE && pa < crate::pci::ECAM_BASE + crate::pci::ECAM_SIZE {
+                self.pci.ecam_write(pa - crate::pci::ECAM_BASE, size, v);
+            } else {
+                let b = self.pci.bar_base();
+                self.pci.bar_write(pa - b, size, v, &self.ram, &mut self.bus.gic);
+            }
+            Ok(())
         } else if pa < self.ram.base {
             self.bus.write(pa, size, v);
             Ok(())
@@ -204,8 +269,17 @@ impl Machine {
         }
     }
 
+    pub fn fetch_res(&mut self, pc: u64) -> Result<u32, String> {
+        let pa = self.translate_acc(pc, 2)?;
+        if self.ram.contains(pa, 4) {
+            Ok(self.ram.read(pa, 4) as u32)
+        } else {
+            Err(format!("instruction fetch from unmapped physical {:#x}", pa))
+        }
+    }
+
     pub fn fetch_word(&mut self, pc: u64) -> Option<u32> {
-        let pa = self.translate(pc).ok()?;
+        let pa = self.translate_acc(pc, 2).ok()?;
         if self.ram.contains(pa, 4) {
             Some(self.ram.read(pa, 4) as u32)
         } else {
@@ -278,16 +352,31 @@ impl Machine {
 
     pub fn step(&mut self, ctx: &mut Ctx, runner_flush: &mut bool) -> Step {
         let pc = ctx.pc;
-        let w = match self.fetch_word(pc) {
-            Some(w) => w,
-            None => return Step::Stop(format!("instruction fetch failed at {:#x}", pc)),
+        let w = match self.fetch_res(pc) {
+            Ok(w) => w,
+            Err(m) => {
+                if let Some((va, fsc)) = parse_fault(&m) {
+                    self.exc_count += 1;
+                    if self.exc_count > 50_000_000 {
+                        return Step::Stop(format!("too many exceptions, last instruction fetch fault at {:#x}", pc));
+                    }
+                    let ec = if self.el0 { 0x20u64 } else { 0x21 };
+                    self.take_sync(ctx, pc, (ec << 26) | (1 << 25) | fsc, Some(va));
+                    if self.say_exc {
+                        println!("exc #{} instruction abort va {:#x} fsc {:#x} -> {:#x}", self.exc_count, va, fsc, ctx.pc);
+                    }
+                    return Step::Next;
+                }
+                return Step::Stop(format!("instruction fetch failed at {:#x}: {}", pc, m));
+            }
         };
         self.events += 1;
         if self.events > self.max_events {
             return Step::Stop("step limit".to_string());
         }
         self.cur_pc = pc;
-        let hi = self.events & 511;
+        self.bus.cur_pc = pc;
+        let hi = self.events & 4095;
         self.hist[hi] = (pc, w);
         if (self.irq_force || self.events & 0x3f == 0) && !self.no_irq {
             self.irq_force = false;
@@ -309,42 +398,39 @@ impl Machine {
         }
         let mut r = self.exec(ctx, pc, w, insn);
         if let Step::Stop(m) = &r {
-            if let Some(rest) = m.strip_prefix("translation fault at ") {
-                let va = rest.split_whitespace().next().and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok()).unwrap_or(0);
-                let level = rest.split("(level ").nth(1).and_then(|v| v.split(')').next()).and_then(|v| v.parse::<u64>().ok()).unwrap_or(3);
-                if self.last_exc == (pc, va, self.exc_count.wrapping_sub(1)) {
-                    // same fault repeated right after delivery
-                }
+            if let Some((va, fsc)) = parse_fault(m) {
                 self.exc_count += 1;
-                if self.exc_count > 5_000_000 {
+                if self.exc_count > 50_000_000 {
                     return r;
                 }
-                let voff = if self.spsel == 0 { 0u64 } else { 0x200 };
-                let pan_bit = self.pan << 22;
-                if self.mmu.sctlr & (1 << 23) == 0 {
-                    self.pan = 1;
-                }
-                let spsr = (anathema_xlat::run::flags_to_nzcv(ctx.flags) & 0xf000_0000) | self.daif | pan_bit | if self.spsel == 0 { 4 } else { 5 };
-                if self.spsel == 0 {
-                    ctx.sys[3] = ctx.x[31];
-                    ctx.x[31] = self.sp_el1;
-                    self.spsel = 1;
-                }
-                let esr = (0x25u64 << 26) | (1 << 25) | ((self.last_write as u64) << 6) | (4 + level);
-                ctx.sys[7] = esr;
-                ctx.sys[6] = va;
-                ctx.sys[4] = pc;
-                ctx.sys[5] = spsr;
-                self.daif = 0x3c0;
-                ctx.pc = ctx.sys[8] + voff;
+                let ec = if self.el0 { 0x24u64 } else { 0x25 };
+                let esr = (ec << 26) | (1 << 25) | ((self.last_write as u64) << 6) | fsc;
+                self.take_sync(ctx, pc, esr, Some(va));
                 if self.say_exc {
-                    println!("exc #{} data abort va {:#x} level {} write {} at pc {:#x} -> vbar+0x200 {:#x}", self.exc_count, va, level, self.last_write, pc, ctx.pc);
-                    if std::env::var("RT_EXCREGS").is_ok() {
-                        println!("   x0 {:#x} x1 {:#x} x8 {:#x} x9 {:#x} x12 {:#x} x13 {:#x} x16 {:#x} x19 {:#x} x20 {:#x} x21 {:#x} x22 {:#x} x26 {:#x} x27 {:#x} x28 {:#x}", ctx.x[0], ctx.x[1], ctx.x[8], ctx.x[9], ctx.x[12], ctx.x[13], ctx.x[16], ctx.x[19], ctx.x[20], ctx.x[21], ctx.x[22], ctx.x[26], ctx.x[27], ctx.x[28]);
+                    println!("exc #{} data abort va {:#x} fsc {:#x} write {} at pc {:#x} -> {:#x}", self.exc_count, va, fsc, self.last_write, pc, ctx.pc);
+                    if crate::sys::var("RT_EXCREGS").is_ok() {
+                        println!("   x0 {:#x} x1 {:#x} x8 {:#x} x9 {:#x} x16 {:#x} x19 {:#x} x20 {:#x}", ctx.x[0], ctx.x[1], ctx.x[8], ctx.x[9], ctx.x[16], ctx.x[19], ctx.x[20]);
                     }
                 }
                 self.last_exc = (pc, va, self.exc_count);
                 r = Step::Next;
+            }
+        }
+        if self.bus.gfx_kick {
+            self.bus.gfx_kick = false;
+            let p = self.bus.reg(0x3020_1008);
+            let a = self.bus.reg(0x3020_101c) << 14;
+            let b = self.bus.reg(0x3020_1030) << 14;
+            let c = self.bus.reg(0x3020_1004);
+            println!("GFXKICK prod {:#x} reg1c-pa {:#x} reg30-pa {:#x} reg04 {:#x}", p, a, b, c);
+            for base in [a + 0x4000, b + 0x4000, a, b] {
+                if self.ram.contains(base, 0x80) {
+                    let mut line = String::new();
+                    for i in 0..32u64 {
+                        line.push_str(&format!("{:08x} ", self.ram.read(base + i * 4, 4)));
+                    }
+                    println!("   {:#x}: {}", base, line);
+                }
             }
         }
         if self.hit {
@@ -421,15 +507,21 @@ impl Machine {
                     let b = tryv!(self.load(ea + n as u64, n));
                     wr(ctx, rt2, b);
                 }
+                self.excl = Some(ea);
             }
             Insn::Stex { size, rs, rt, rt2, rn, pair } => {
                 let ea = rd(ctx, rn);
                 let n = 1usize << size;
-                tryv!(self.store(ea, n, rd(ctx, rt) & mask(n)));
-                if pair {
-                    tryv!(self.store(ea + n as u64, n, rd(ctx, rt2) & mask(n)));
+                if self.excl == Some(ea) {
+                    tryv!(self.store(ea, n, rd(ctx, rt) & mask(n)));
+                    if pair {
+                        tryv!(self.store(ea + n as u64, n, rd(ctx, rt2) & mask(n)));
+                    }
+                    wr(ctx, rs, 0);
+                } else {
+                    wr(ctx, rs, 1);
                 }
-                wr(ctx, rs, 0);
+                self.excl = None;
             }
             Insn::Ldar { size, rt, rn } => {
                 let n = 1usize << size;
@@ -608,7 +700,7 @@ impl Machine {
                     let va = if rt == 31 { 0 } else { ctx.x[rt as usize] };
                     let par = if !self.mmu.enabled() { va & 0x0000_ffff_ffff_f000 } else {
                         match self.mmu.translate(&self.ram, va) {
-                            Ok(pa) => (pa & 0x0000_ffff_ffff_f000) | 0x800 ,
+                            Ok((pa, _)) => (pa & 0x0000_ffff_ffff_f000) | 0x800,
                             Err(_) => 1,
                         }
                     };
@@ -618,6 +710,13 @@ impl Machine {
                 if say {
                     println!("#{} {:#x} sys op1 {} c{} c{} op2 {} x{}", self.events, pc, op1, crn, crm, op2, rt);
                 }
+            }
+            Insn::Exc { kind: ExcKind::Svc, imm } => {
+                self.take_sync(ctx, pc + 4, (0x15u64 << 26) | (1 << 25) | (imm as u64 & 0xffff), None);
+                if self.say_exc {
+                    println!("svc #{:#x} x16 {:#x} x0 {:#x} from {} pc {:#x}", imm, ctx.x[16], ctx.x[0], if self.el0 { "el0" } else { "el1" }, pc);
+                }
+                return Step::Next;
             }
             Insn::Exc { kind: ExcKind::Hvc | ExcKind::Smc, imm } => {
                 let f = ctx.x[0];
@@ -640,10 +739,10 @@ impl Machine {
                 let spsr = ctx.sys[5];
                 let elr = ctx.sys[4];
                 let m = spsr & 0xf;
-                if m != 5 && m != 4 {
+                if m != 5 && m != 4 && m != 0 {
                     return Step::Stop(format!("eret to unsupported mode {:#x} at {:#x}", spsr, pc));
                 }
-                if m == 4 && self.spsel == 1 {
+                if (m == 4 || m == 0) && self.spsel == 1 {
                     self.sp_el1 = ctx.x[31];
                     ctx.x[31] = ctx.sys[3];
                     self.spsel = 0;
@@ -652,6 +751,8 @@ impl Machine {
                     ctx.x[31] = self.sp_el1;
                     self.spsel = 1;
                 }
+                self.el0 = m == 0;
+                self.excl = None;
                 self.daif = spsr & 0x3c0;
                 self.pan = (spsr >> 22) & 1;
                 self.irq_force = true;
@@ -664,6 +765,12 @@ impl Machine {
             }
             Insn::Hint { op } if op == 2 => {
                 self.skip += 2400;
+                if self.stop_idle {
+                    self.wfe_count += 1;
+                    if self.wfe_count > 40 {
+                        return Step::Stop(format!("idle wfe at {:#x}", pc));
+                    }
+                }
             }
             Insn::Hint { op } if op == 3 => {
                 self.irq_poll();
@@ -811,22 +918,50 @@ impl Machine {
         self.bus.gic.deliverable()
     }
 
-    fn take_irq(&mut self, ctx: &mut Ctx, pc: u64, fiq: bool) {
-        let voff = (if self.spsel == 0 { 0u64 } else { 0x200 }) + if fiq { 0x100 } else { 0x80 };
+    fn take_sync(&mut self, ctx: &mut Ctx, elr: u64, esr: u64, far: Option<u64>) {
+        self.enter_el1(ctx, elr, 0);
+        ctx.sys[7] = esr;
+        if let Some(f) = far {
+            ctx.sys[6] = f;
+        }
+    }
+
+    fn enter_el1(&mut self, ctx: &mut Ctx, elr: u64, kind_off: u64) {
+        self.excl = None;
+        let from_el0 = self.el0;
+        let base = if from_el0 {
+            0x400
+        } else if self.spsel == 0 {
+            0
+        } else {
+            0x200
+        };
         let pan_bit = self.pan << 22;
         if self.mmu.sctlr & (1 << 23) == 0 {
             self.pan = 1;
         }
-        let spsr = (anathema_xlat::run::flags_to_nzcv(ctx.flags) & 0xf000_0000) | self.daif | pan_bit | if self.spsel == 0 { 4 } else { 5 };
+        let m = if from_el0 {
+            0
+        } else if self.spsel == 0 {
+            4
+        } else {
+            5
+        };
+        let spsr = (anathema_xlat::run::flags_to_nzcv(ctx.flags) & 0xf000_0000) | self.daif | pan_bit | m;
         if self.spsel == 0 {
             ctx.sys[3] = ctx.x[31];
             ctx.x[31] = self.sp_el1;
             self.spsel = 1;
         }
-        ctx.sys[4] = pc;
+        ctx.sys[4] = elr;
         ctx.sys[5] = spsr;
         self.daif = 0x3c0;
-        ctx.pc = ctx.sys[8] + voff;
+        self.el0 = false;
+        ctx.pc = ctx.sys[8] + base + kind_off;
+    }
+
+    fn take_irq(&mut self, ctx: &mut Ctx, pc: u64, fiq: bool) {
+        self.enter_el1(ctx, pc, if fiq { 0x100 } else { 0x80 });
         self.irq_taken += 1;
         if self.say_exc {
             println!("irq #{} {} at pc {:#x} -> {:#x}", self.irq_taken, if fiq { "fiq" } else { "irq" }, pc, ctx.pc);
@@ -976,8 +1111,8 @@ impl Machine {
             return self.daif;
         }
         if id == sysreg_id(3, 3, 14, 0, 1) || id == sysreg_id(3, 3, 14, 0, 2) {
-            if std::env::var("RT_REALTIME").is_ok() {
-                return self.started.elapsed().as_nanos() as u64 * 24 / 1000;
+            if crate::sys::var("RT_REALTIME").is_ok() {
+                return crate::sys::nanos().wrapping_sub(self.started) * 24 / 1000;
             }
             return self.now();
         }
@@ -1019,7 +1154,7 @@ impl Machine {
 }
 
 pub struct Fetcher<'a> {
-    pub m: std::cell::RefCell<&'a mut Machine>,
+    pub m: core::cell::RefCell<&'a mut Machine>,
 }
 
 impl<'a> Fetch for Fetcher<'a> {
@@ -1029,4 +1164,19 @@ impl<'a> Fetch for Fetcher<'a> {
         }
         self.m.borrow_mut().fetch_word(pc)
     }
+}
+
+fn parse_fault(msg: &str) -> Option<(u64, u64)> {
+    let (base, rest) = if let Some(r) = msg.strip_prefix("translation fault at ") {
+        (0x4u64, r)
+    } else if let Some(r) = msg.strip_prefix("permission fault at ") {
+        (0xc, r)
+    } else if let Some(r) = msg.strip_prefix("access flag fault at ") {
+        (0x8, r)
+    } else {
+        return None;
+    };
+    let va = rest.split_whitespace().next().and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok()).unwrap_or(0);
+    let level = rest.split("(level ").nth(1).and_then(|v| v.split(')').next()).and_then(|v| v.parse::<u64>().ok()).unwrap_or(3);
+    Some((va, base + level))
 }
