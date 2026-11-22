@@ -1,5 +1,6 @@
 mod boot;
 mod fbcheck;
+mod gic;
 mod dt;
 mod machine;
 mod macho;
@@ -180,6 +181,35 @@ fn main() {
         }
     }
     println!("stopped: {}", reason);
+    if std::env::var("RT_MSGBUF").is_ok() {
+        let mut pa = RAM_BASE;
+        let end = RAM_BASE + RAM_SIZE;
+        while pa < end {
+            if m.ram.read(pa, 4) == 0x063061 {
+                let size = m.ram.read(pa + 4, 4) as usize;
+                let bufx = m.ram.read(pa + 8, 4) as usize;
+                if size >= 0x1000 && size <= 0x100000 && bufx <= size && m.ram.contains(pa, 16 + size as u64) {
+                    let b = m.ram.bytes(pa + 16, size);
+                    let txt: Vec<u8> = b.iter().cloned().filter(|c| *c != 0).collect();
+                    if txt.len() > 16 {
+                        println!("--- msgbuf at {:#x} size {} bufx {} ---", pa, size, bufx);
+                        println!("{}", String::from_utf8_lossy(&txt));
+                        println!("--- end msgbuf ---");
+                    }
+                }
+            }
+            pa += 8;
+        }
+    }
+    if std::env::var("RT_HIST").is_ok() {
+        let n: usize = std::env::var("RT_HIST").ok().and_then(|v| v.parse().ok()).unwrap_or(100);
+        println!("last steps:");
+        for k in (0..n).rev() {
+            let e = m.events.wrapping_sub(k) & 511;
+            let (pc, w) = m.hist[e];
+            println!("  {:#x} {:08x}", pc, w);
+        }
+    }
     println!("interpreter steps {}, mmu {}", m.events, if m.mmu.enabled() { "on" } else { "off" });
     println!("pc {:#x}", ctx.pc);
     for r in 0..31 {

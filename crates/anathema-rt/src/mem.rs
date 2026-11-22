@@ -53,6 +53,7 @@ pub const FB_BASE: u64 = 0x6000_0000;
 pub const FB_BYTES: usize = 1920 * 1080 * 4;
 
 pub struct Bus {
+    pub gic: crate::gic::Gic,
     pub fb: Vec<u8>,
     pub uart: String,
     regs: HashMap<u64, u64>,
@@ -62,7 +63,7 @@ pub struct Bus {
 
 impl Bus {
     pub fn new() -> Bus {
-        Bus { fb: vec![0u8; FB_BYTES], uart: String::new(), regs: HashMap::new(), log_budget: 300, seen: HashMap::new() }
+        Bus { gic: crate::gic::Gic::new(), fb: vec![0u8; FB_BYTES], uart: String::new(), regs: HashMap::new(), log_budget: 300, seen: HashMap::new() }
     }
 
     fn note(&mut self, kind: &str, pa: u64, size: usize, v: u64) {
@@ -81,6 +82,18 @@ impl Bus {
             let mut b = [0u8; 8];
             b[..size].copy_from_slice(&self.fb[o..o + size]);
             return u64::from_le_bytes(b);
+        }
+        if pa >= crate::gic::GIC_BASE && pa < crate::gic::GIC_BASE + crate::gic::GICD_SIZE {
+            return self.gic.dist((pa - crate::gic::GIC_BASE) as usize, size, None);
+        }
+        if pa >= crate::gic::MSI_BASE && pa < crate::gic::MSI_BASE + 0x1_0000 {
+            return self.gic.msi((pa - crate::gic::MSI_BASE) as usize, None);
+        }
+        if pa >= crate::gic::GICR_BASE && pa < crate::gic::GICR_BASE + crate::gic::GICR_SIZE {
+            return self.gic.redist((pa - crate::gic::GICR_BASE) as usize, size, None);
+        }
+        if pa >= 0x4000_0000 && pa < 0x5000_0000 {
+            return if size >= 8 { u64::MAX } else { (1u64 << (size * 8)) - 1 };
         }
         let v = match pa {
             0x2001_0018 => 0x90,
@@ -102,6 +115,18 @@ impl Bus {
         if pa >= FB_BASE && pa + size as u64 <= FB_BASE + FB_BYTES as u64 {
             let o = (pa - FB_BASE) as usize;
             self.fb[o..o + size].copy_from_slice(&v.to_le_bytes()[..size]);
+            return;
+        }
+        if pa >= crate::gic::GIC_BASE && pa < crate::gic::GIC_BASE + crate::gic::GICD_SIZE {
+            self.gic.dist((pa - crate::gic::GIC_BASE) as usize, size, Some(v));
+            return;
+        }
+        if pa >= crate::gic::MSI_BASE && pa < crate::gic::MSI_BASE + 0x1_0000 {
+            self.gic.msi((pa - crate::gic::MSI_BASE) as usize, Some(v));
+            return;
+        }
+        if pa >= crate::gic::GICR_BASE && pa < crate::gic::GICR_BASE + crate::gic::GICR_SIZE {
+            self.gic.redist((pa - crate::gic::GICR_BASE) as usize, size, Some(v));
             return;
         }
         if pa == 0x2001_0000 {

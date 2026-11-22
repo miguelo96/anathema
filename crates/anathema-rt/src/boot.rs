@@ -65,6 +65,20 @@ pub fn load_kernel(ram: &Ram, img: &Image, data: &[u8], dt_bytes: &[u8], cmdline
         v.extend_from_slice(&RAM_SIZE.to_le_bytes());
         mem.set("reg", v);
     }
+    if std::env::var("RT_KEEPGFX").is_err() {
+        if let Some(io) = root.child_mut("arm-io") {
+            io.children.retain(|c| {
+                let n = c.name();
+                n != "gfx" && n != "iosurface-mapper"
+            });
+        }
+    }
+    if let Some(cpus) = root.child_mut("cpus") {
+        cpus.children.retain(|c| {
+            let n = c.name();
+            !(n.starts_with("cpu") && n[3..].parse::<u32>().map(|v| v > 0).unwrap_or(false))
+        });
+    }
     let mut seed = vec![0u8; 256];
     let mut x = 0x9e37_79b9_7f4a_7c15u64;
     for b in seed.iter_mut() {

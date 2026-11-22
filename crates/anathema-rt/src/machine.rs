@@ -14,6 +14,13 @@ pub struct Machine {
     pub counts: HashMap<String, usize>,
     pub started: Instant,
     pub events: usize,
+    pub skip: u64,
+    pub max_events: usize,
+    pub hist: Vec<(u64, u32)>,
+    pub no_irq: bool,
+    pub irq_taken: u64,
+    pub tm: [u64; 4],
+    pub irq_force: bool,
     pub trace_budget: usize,
     pub flush: bool,
     pub elog: bool,
@@ -107,6 +114,13 @@ impl Machine {
             counts: HashMap::new(),
             started: Instant::now(),
             events: 0,
+            skip: 0,
+            max_events: std::env::var("RT_MAXSTEPS").ok().and_then(|v| v.parse().ok()).unwrap_or(usize::MAX),
+            hist: vec![(0, 0); 512],
+            no_irq: std::env::var("RT_NOIRQ").is_ok(),
+            irq_taken: 0,
+            tm: [1, u64::MAX, 0, u64::MAX],
+            irq_force: false,
             trace_budget: 400,
             flush: false,
             elog: std::env::var("RT_ELOG").is_ok(),
@@ -269,7 +283,22 @@ impl Machine {
             None => return Step::Stop(format!("instruction fetch failed at {:#x}", pc)),
         };
         self.events += 1;
+        if self.events > self.max_events {
+            return Step::Stop("step limit".to_string());
+        }
         self.cur_pc = pc;
+        let hi = self.events & 511;
+        self.hist[hi] = (pc, w);
+        if (self.irq_force || self.events & 0x3f == 0) && !self.no_irq {
+            self.irq_force = false;
+            if let Some(fiq) = self.irq_poll() {
+                let masked = if fiq { self.daif & 0x40 != 0 } else { self.daif & 0x80 != 0 };
+                if !masked {
+                    self.take_irq(ctx, pc, fiq);
+                    return Step::Next;
+                }
+            }
+        }
         let insn = decode(w);
         if self.elog {
             let mut fp = 0u64;
@@ -557,6 +586,7 @@ impl Machine {
                     self.daif |= (imm as u64 & 0xf) << 6;
                 } else if field == 31 {
                     self.daif &= !((imm as u64 & 0xf) << 6);
+                    self.irq_force = true;
                 }
                 self.count(format!("msr-imm {}", field));
                 if say {
@@ -624,6 +654,7 @@ impl Machine {
                 }
                 self.daif = spsr & 0x3c0;
                 self.pan = (spsr >> 22) & 1;
+                self.irq_force = true;
                 ctx.flags = anathema_xlat::run::nzcv_to_flags(spsr, ctx.flags);
                 ctx.pc = elr;
                 if self.say_exc {
@@ -631,8 +662,28 @@ impl Machine {
                 }
                 return Step::Next;
             }
-            Insn::Hint { op } if op == 2 || op == 3 => {
-                return Step::Stop(format!("wait for event/interrupt at {:#x}", pc));
+            Insn::Hint { op } if op == 2 => {
+                self.skip += 2400;
+            }
+            Insn::Hint { op } if op == 3 => {
+                self.irq_poll();
+                if !self.bus.gic.wake() {
+                    let now = self.now();
+                    let mut dl = u64::MAX;
+                    if self.tm[0] & 3 == 1 {
+                        dl = dl.min(self.tm[1]);
+                    }
+                    if self.tm[2] & 3 == 1 {
+                        dl = dl.min(self.tm[3]);
+                    }
+                    if dl == u64::MAX {
+                        return Step::Stop(format!("wfi with no wake source at {:#x}", pc));
+                    }
+                    if dl > now {
+                        self.skip += dl - now;
+                    }
+                }
+                self.irq_force = true;
             }
             Insn::Hint { .. } => {}
             Insn::Unsup(_) if crate::simd::fallback(ctx, w) => {}
@@ -753,7 +804,174 @@ impl Machine {
         Ok(())
     }
 
+    pub fn irq_poll(&mut self) -> Option<bool> {
+        let now = self.now();
+        self.bus.gic.level[27] = self.tm[0] & 3 == 1 && now >= self.tm[1];
+        self.bus.gic.level[30] = self.tm[2] & 3 == 1 && now >= self.tm[3];
+        self.bus.gic.deliverable()
+    }
+
+    fn take_irq(&mut self, ctx: &mut Ctx, pc: u64, fiq: bool) {
+        let voff = (if self.spsel == 0 { 0u64 } else { 0x200 }) + if fiq { 0x100 } else { 0x80 };
+        let pan_bit = self.pan << 22;
+        if self.mmu.sctlr & (1 << 23) == 0 {
+            self.pan = 1;
+        }
+        let spsr = (anathema_xlat::run::flags_to_nzcv(ctx.flags) & 0xf000_0000) | self.daif | pan_bit | if self.spsel == 0 { 4 } else { 5 };
+        if self.spsel == 0 {
+            ctx.sys[3] = ctx.x[31];
+            ctx.x[31] = self.sp_el1;
+            self.spsel = 1;
+        }
+        ctx.sys[4] = pc;
+        ctx.sys[5] = spsr;
+        self.daif = 0x3c0;
+        ctx.pc = ctx.sys[8] + voff;
+        self.irq_taken += 1;
+        if self.say_exc {
+            println!("irq #{} {} at pc {:#x} -> {:#x}", self.irq_taken, if fiq { "fiq" } else { "irq" }, pc, ctx.pc);
+        }
+    }
+
+    fn dev_read(&mut self, id: u16) -> Option<u64> {
+        let now = self.now();
+        let ctl = |c: u64, cv: u64| (c & 3) | if c & 3 == 1 && now >= cv { 4 } else { 0 };
+        let s = |crn: u32, crm: u32, op2: u32| sysreg_id(3, 0, crn, crm, op2);
+        let t = |crm: u32, op2: u32| sysreg_id(3, 3, 14, crm, op2);
+        if id == t(3, 0) {
+            return Some(self.tm[1].wrapping_sub(now) as u32 as u64);
+        }
+        if id == t(3, 1) {
+            return Some(ctl(self.tm[0], self.tm[1]));
+        }
+        if id == t(3, 2) {
+            return Some(self.tm[1]);
+        }
+        if id == t(2, 0) {
+            return Some(self.tm[3].wrapping_sub(now) as u32 as u64);
+        }
+        if id == t(2, 1) {
+            return Some(ctl(self.tm[2], self.tm[3]));
+        }
+        if id == t(2, 2) {
+            return Some(self.tm[3]);
+        }
+        if id == s(12, 1, 0) {
+            return Some(match self.irq_poll() {
+                Some(true) => 1 << 6,
+                Some(false) => 1 << 7,
+                None => 0,
+            });
+        }
+        let g = &mut self.bus.gic;
+        if id == s(12, 12, 0) {
+            self.irq_force = true;
+            return Some(g.ack(true));
+        }
+        if id == s(12, 8, 0) {
+            self.irq_force = true;
+            return Some(g.ack(false));
+        }
+        if id == s(12, 12, 2) {
+            return Some(g.hppir(true));
+        }
+        if id == s(12, 8, 2) {
+            return Some(g.hppir(false));
+        }
+        if id == s(12, 11, 3) {
+            return Some(g.rpr());
+        }
+        if id == s(4, 6, 0) {
+            return Some(g.pmr);
+        }
+        if id == s(12, 12, 4) {
+            return Some(g.ctlr);
+        }
+        if id == s(12, 12, 5) {
+            return Some(g.sre);
+        }
+        if id == s(12, 12, 6) {
+            return Some(g.igrpen1);
+        }
+        if id == s(12, 8, 6) {
+            return Some(g.igrpen0);
+        }
+        None
+    }
+
+    fn dev_write(&mut self, id: u16, v: u64) -> bool {
+        let now = self.now();
+        let s = |crn: u32, crm: u32, op2: u32| sysreg_id(3, 0, crn, crm, op2);
+        let t = |crm: u32, op2: u32| sysreg_id(3, 3, 14, crm, op2);
+        if id == t(3, 0) {
+            self.tm[1] = now.wrapping_add(v as u32 as i32 as i64 as u64);
+            return true;
+        }
+        if id == t(3, 1) {
+            self.tm[0] = v & 3;
+            return true;
+        }
+        if id == t(3, 2) {
+            self.tm[1] = v;
+            return true;
+        }
+        if id == t(2, 0) {
+            self.tm[3] = now.wrapping_add(v as u32 as i32 as i64 as u64);
+            return true;
+        }
+        if id == t(2, 1) {
+            self.tm[2] = v & 3;
+            return true;
+        }
+        if id == t(2, 2) {
+            self.tm[3] = v;
+            return true;
+        }
+        let g = &mut self.bus.gic;
+        self.irq_force = true;
+        if id == s(12, 12, 1) || id == s(12, 8, 1) {
+            g.eoi((v & 0xff_ffff) as usize);
+            return true;
+        }
+        if id == s(12, 11, 1) {
+            g.deactivate((v & 0xff_ffff) as usize);
+            return true;
+        }
+        if id == s(12, 11, 5) || id == s(12, 11, 6) || id == s(12, 11, 7) {
+            g.sgi(v);
+            return true;
+        }
+        if id == s(4, 6, 0) {
+            g.pmr = v & 0xff;
+            return true;
+        }
+        if id == s(12, 12, 4) {
+            g.ctlr = (v & 3) | 0x8f00;
+            return true;
+        }
+        if id == s(12, 12, 5) {
+            g.sre = 7;
+            return true;
+        }
+        if id == s(12, 12, 6) {
+            g.igrpen1 = v & 1;
+            return true;
+        }
+        if id == s(12, 8, 6) {
+            g.igrpen0 = v & 1;
+            return true;
+        }
+        false
+    }
+
+    pub fn now(&self) -> u64 {
+        1_000_000 + self.events as u64 * 24 + self.skip
+    }
+
     fn read_sys(&mut self, id: u16) -> u64 {
+        if let Some(v) = self.dev_read(id) {
+            return v;
+        }
         if id == sysreg_id(3, 3, 4, 2, 1) {
             return self.daif;
         }
@@ -761,7 +979,7 @@ impl Machine {
             if std::env::var("RT_REALTIME").is_ok() {
                 return self.started.elapsed().as_nanos() as u64 * 24 / 1000;
             }
-            return 1_000_000 + self.events as u64 * 24;
+            return self.now();
         }
         if id == sysreg_id(3, 0, 4, 2, 0) {
             return self.spsel;
@@ -773,6 +991,10 @@ impl Machine {
     }
 
     fn write_sys(&mut self, id: u16, v: u64) {
+        if self.dev_write(id, v) {
+            return;
+        }
+        self.irq_force = true;
         self.sys.insert(id, v);
         if id == sysreg_id(3, 3, 4, 2, 1) {
             self.daif = v & 0x3c0;
