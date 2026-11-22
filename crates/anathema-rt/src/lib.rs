@@ -18,6 +18,7 @@ macro_rules! print {
 
 pub mod sys;
 pub mod boot;
+pub mod aesdev;
 pub mod dt;
 pub mod gic;
 pub mod machine;

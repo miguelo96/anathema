@@ -11,6 +11,8 @@ std = ["anathema-xlat/std"]
 [dependencies]
 anathema-xlat = { path = "../anathema-xlat", default-features = false }
 
+aes = { version = "0.8", default-features = false }
+
 [lib]
 name = "anathema_rt"
 path = "src/lib.rs"

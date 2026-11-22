@@ -1,4 +1,5 @@
 mod boot;
+mod aesdev;
 mod sys;
 #[macro_use]
 extern crate alloc;

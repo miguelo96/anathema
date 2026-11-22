@@ -68,6 +68,11 @@ pub struct Bus {
     pub fb: Vec<u8>,
     pub uart: String,
     regs: HashMap<u64, u64>,
+    pub aes_irq_status: u32,
+    pub aes_irq_enable: u32,
+    pub aes_flag_info: u32,
+    pub aes_fifo: Vec<u32>,
+    pub aes_kick: bool,
     pub log_budget: usize,
     pub cur_pc: u64,
     pub gfx_kick: bool,
@@ -77,7 +82,7 @@ pub struct Bus {
 
 impl Bus {
     pub fn new() -> Bus {
-        Bus { gic: crate::gic::Gic::new(), fb: vec![0u8; FB_BYTES], uart: String::new(), regs: HashMap::default(), log_budget: 300, cur_pc: 0, gfx_kick: false, gfx_log: 400, seen: HashMap::default() }
+        Bus { gic: crate::gic::Gic::new(), fb: vec![0u8; FB_BYTES], uart: String::new(), regs: HashMap::default(), aes_irq_status: 0, aes_irq_enable: 0, aes_flag_info: 0, aes_fifo: Vec::new(), aes_kick: false, log_budget: 300, cur_pc: 0, gfx_kick: false, gfx_log: 400, seen: HashMap::default() }
     }
 
     fn note(&mut self, kind: &str, pa: u64, size: usize, v: u64) {
@@ -112,6 +117,20 @@ impl Bus {
         }
         if pa >= crate::gic::GICR_BASE && pa < crate::gic::GICR_BASE + crate::gic::GICR_SIZE {
             return self.gic.redist((pa - crate::gic::GICR_BASE) as usize, size, None);
+        }
+        if (0x3022_0000..0x3022_4000).contains(&pa) {
+            let off = pa - 0x3022_0000;
+            return match off {
+                0xc => 0x3f80,
+                0x18 => self.aes_irq_status as u64,
+                0x1c => self.aes_irq_enable as u64,
+                0x24 => 2,
+                0x30 => self.aes_flag_info as u64,
+                _ => 0,
+            };
+        }
+        if (0x3023_0000..0x3023_4000).contains(&pa) {
+            return 0;
         }
         if pa >= 0x4000_0000 && pa < 0x5000_0000 {
             return if size >= 8 { u64::MAX } else { (1u64 << (size * 8)) - 1 };
@@ -155,6 +174,17 @@ impl Bus {
         }
         if pa >= crate::gic::GICR_BASE && pa < crate::gic::GICR_BASE + crate::gic::GICR_SIZE {
             self.gic.redist((pa - crate::gic::GICR_BASE) as usize, size, Some(v));
+            return;
+        }
+        if (0x3022_0000..0x3022_4000).contains(&pa) {
+            let off = pa - 0x3022_0000;
+            match off {
+                0x18 => self.aes_irq_status &= !(v as u32),
+                0x1c => self.aes_irq_enable = v as u32,
+                0x200 => self.aes_fifo.push(v as u32),
+                _ => {}
+            }
+            self.aes_kick = true;
             return;
         }
         if pa == 0x2001_0000 {

@@ -25,7 +25,7 @@ pub struct Gic {
     pub igrpen1: u64,
     pub ap: [u64; 8],
     running: Vec<(u8, usize)>,
-    pub level: [bool; 32],
+    pub level: Vec<bool>,
 }
 
 fn pidr2(off: usize) -> Option<u64> {
@@ -54,7 +54,7 @@ impl Gic {
             igrpen1: 1,
             ap: [0; 8],
             running: Vec::new(),
-            level: [false; 32],
+            level: vec![false; NINT],
         }
     }
 
@@ -229,7 +229,7 @@ impl Gic {
     }
 
     fn pending_of(&self, id: usize) -> bool {
-        (self.bits[2][id] || (id < 32 && self.level[id])) && !self.bits[3][id]
+        (self.bits[2][id] || self.level[id]) && !self.bits[3][id]
     }
 
     fn run_prio(&self) -> u8 {
@@ -267,7 +267,7 @@ impl Gic {
         match self.best(false) {
             Some((p, id, g1)) if g1 == group1 => {
                 self.bits[3][id] = true;
-                if !(id < 32 && self.level[id]) {
+                if !self.level[id] {
                     self.bits[2][id] = false;
                 }
                 self.running.push((p, id));

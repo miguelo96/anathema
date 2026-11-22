@@ -15,11 +15,15 @@ pub struct Machine {
     pub started: u64,
     pub events: usize,
     pub skip: u64,
+    pub wsearch: u64,
+    pub wsearch_n: usize,
+    pub aes: crate::aesdev::AesState,
     pub excl: Option<u64>,
     pub rwatch: Vec<(u64, u64)>,
     pub rwatch_budget: usize,
     pub stop_idle: bool,
     pub wfe_count: u64,
+    pub wfe_pc: u64,
     pub pci: crate::pci::Pci,
     pub max_events: usize,
     pub hist: Vec<(u64, u32)>,
@@ -123,11 +127,15 @@ impl Machine {
             started: crate::sys::nanos(),
             events: 0,
             skip: 0,
+            wsearch: crate::sys::var("RT_WSEARCH").ok().and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok()).unwrap_or(0),
+            wsearch_n: 0,
+            aes: crate::aesdev::AesState::new(),
             excl: None,
             rwatch: crate::sys::var("RT_RDWATCH").map(|v| v.split(',').filter_map(|p| { let mut it = p.split(':'); let a = u64::from_str_radix(it.next()?, 16).ok()?; let l = u64::from_str_radix(it.next()?, 16).ok()?; Some((a, l)) }).collect()).unwrap_or_default(),
             rwatch_budget: 200,
             stop_idle: crate::sys::var("RT_STOPIDLE").is_ok(),
             wfe_count: 0,
+            wfe_pc: 0,
             pci: crate::pci::Pci::new(),
             max_events: crate::sys::var("RT_MAXSTEPS").ok().and_then(|v| v.parse().ok()).unwrap_or(usize::MAX),
             hist: vec![(0, 0); 4096],
@@ -242,6 +250,10 @@ impl Machine {
         if self.watch != 0 && va <= self.watch && va + size as u64 > self.watch {
             self.hit = true;
             println!("WATCH write {:#x} size {} value {:#x} at pc {:#x} (event {})", va, size, v, self.cur_pc, self.events);
+        }
+        if self.wsearch != 0 && size == 8 && v == self.wsearch && self.wsearch_n < 40 {
+            self.wsearch_n += 1;
+            println!("WSEARCH store {:#x} to va {:#x} pc {:#x} event {}", v, va, self.cur_pc, self.events);
         }
         let pa = self.translate_acc(va, 1)?;
         if self.watch_pa != 0 && pa + size as u64 > self.watch_pa && pa < self.watch_pa + self.watch_len {
@@ -415,6 +427,18 @@ impl Machine {
                 self.last_exc = (pc, va, self.exc_count);
                 r = Step::Next;
             }
+        }
+        if self.bus.aes_kick {
+            self.bus.aes_kick = false;
+            let mut fifo = core::mem::take(&mut self.bus.aes_fifo);
+            let mut irqs = self.bus.aes_irq_status;
+            let mut info = self.bus.aes_flag_info;
+            self.aes.process(&mut fifo, &self.ram, &mut irqs, &mut info);
+            self.bus.aes_fifo = fifo;
+            self.bus.aes_irq_status = irqs;
+            self.bus.aes_flag_info = info;
+            self.bus.gic.level[50] = irqs & self.bus.aes_irq_enable != 0;
+            self.irq_force = true;
         }
         if self.bus.gfx_kick {
             self.bus.gfx_kick = false;
@@ -766,8 +790,13 @@ impl Machine {
             Insn::Hint { op } if op == 2 => {
                 self.skip += 2400;
                 if self.stop_idle {
-                    self.wfe_count += 1;
-                    if self.wfe_count > 40 {
+                    if self.wfe_pc == pc {
+                        self.wfe_count += 1;
+                    } else {
+                        self.wfe_pc = pc;
+                        self.wfe_count = 0;
+                    }
+                    if self.wfe_count > 200_000 {
                         return Step::Stop(format!("idle wfe at {:#x}", pc));
                     }
                 }

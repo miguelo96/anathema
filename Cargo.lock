@@ -105,6 +105,7 @@ dependencies = [
 name = "anathema-rt"
 version = "0.1.0"
 dependencies = [
+ "aes",
  "anathema-xlat",
 ]
 
