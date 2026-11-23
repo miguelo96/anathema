@@ -38,8 +38,12 @@ impl<'a> Zip<'a> {
             cd_size = le64(&h, 40);
             cd_off = le64(&h, 48);
         }
+        if cd_off.checked_add(cd_size).is_none_or(|end| end > len) {
+            bail!("zip central directory lies outside the file");
+        }
         let cd = src.read_vec(cd_off, cd_size as usize)?;
-        let mut entries = Vec::with_capacity(count as usize);
+        // `count` comes from the file; each entry takes at least 46 bytes of the directory.
+        let mut entries = Vec::with_capacity((count as usize).min(cd.len() / 46));
         let mut p = 0usize;
         while p + 46 <= cd.len() && le32(&cd, p) == 0x02014b50 {
             let method = le16(&cd, p + 10);
@@ -49,24 +53,29 @@ impl<'a> Zip<'a> {
             let elen = le16(&cd, p + 30) as usize;
             let clen = le16(&cd, p + 32) as usize;
             let mut header = le32(&cd, p + 42) as u64;
-            let name = String::from_utf8_lossy(&cd[p + 46..p + 46 + nlen]).into_owned();
-            let extra = &cd[p + 46 + nlen..p + 46 + nlen + elen];
+            let name = cd.get(p + 46..p + 46 + nlen).context("truncated zip central directory")?;
+            let name = String::from_utf8_lossy(name).into_owned();
+            let extra = cd.get(p + 46 + nlen..p + 46 + nlen + elen).context("truncated zip central directory")?;
             let mut e = 0;
             while e + 4 <= extra.len() {
                 let id = le16(extra, e);
                 let sz = le16(extra, e + 2) as usize;
                 if id == 1 {
-                    let mut q = e + 4;
-                    if size == 0xffff_ffff {
-                        size = le64(extra, q);
+                    let field = extra.get(e + 4..e + 4 + sz).context("truncated zip64 extra field")?;
+                    let mut q = 0;
+                    let mut next = || -> Result<u64> {
+                        let v = field.get(q..q + 8).context("short zip64 extra field")?;
                         q += 8;
+                        Ok(le64(v, 0))
+                    };
+                    if size == 0xffff_ffff {
+                        size = next()?;
                     }
                     if csize == 0xffff_ffff {
-                        csize = le64(extra, q);
-                        q += 8;
+                        csize = next()?;
                     }
                     if header == 0xffff_ffff {
-                        header = le64(extra, q);
+                        header = next()?;
                     }
                 }
                 e += 4 + sz;

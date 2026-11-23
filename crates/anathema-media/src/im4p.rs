@@ -24,7 +24,7 @@ pub fn tlv(data: &[u8]) -> Result<Tlv<'_>> {
         }
         (l, 2 + n)
     };
-    if data.len() < hdr + len {
+    if hdr.checked_add(len).is_none_or(|end| end > data.len()) {
         bail!("der body exceeds input");
     }
     Ok(Tlv { tag, body: &data[hdr..hdr + len], rest: &data[hdr + len..] })
@@ -88,7 +88,8 @@ pub fn parse(data: &[u8]) -> Result<Im4p> {
 
 pub fn decompress(data: &[u8], expected: Option<u64>) -> Result<Vec<u8>> {
     if data.len() >= 4 && matches!(&data[..4], b"bvx2" | b"bvx1" | b"bvxn" | b"bvx-") {
-        let mut out = Vec::with_capacity(expected.unwrap_or(0) as usize);
+        // `expected` comes from the file; use it only as a bounded allocation hint.
+        let mut out = Vec::with_capacity(expected.unwrap_or(0).min(1 << 28) as usize);
         lzfse_rust::decode_bytes(data, &mut out).map_err(|e| anyhow::anyhow!("lzfse: {e:?}"))?;
         return Ok(out);
     }
@@ -99,12 +100,13 @@ pub fn decompress(data: &[u8], expected: Option<u64>) -> Result<Vec<u8>> {
 }
 
 fn lzss(data: &[u8]) -> Result<Vec<u8>> {
-    let usize_ = u32::from_be_bytes(data[12..16].try_into()?) as usize;
-    let csize = u32::from_be_bytes(data[16..20].try_into()?) as usize;
+    let usize_ = u32::from_be_bytes(data.get(12..16).context("truncated lzss header")?.try_into()?) as usize;
+    let csize = u32::from_be_bytes(data.get(16..20).context("truncated lzss header")?.try_into()?) as usize;
     let src = data.get(0x180..0x180 + csize).context("truncated lzss")?;
     let mut ring = vec![b' '; 4096];
     let mut r = 4096 - 18;
-    let mut out = Vec::with_capacity(usize_);
+    // LZSS expands at most ~9x (a flag byte plus 2-byte references of up to 18 bytes each).
+    let mut out = Vec::with_capacity(usize_.min(src.len().saturating_mul(9)));
     let mut i = 0;
     let mut flags = 0u32;
     while out.len() < usize_ && i < src.len() {
@@ -114,7 +116,7 @@ fn lzss(data: &[u8]) -> Result<Vec<u8>> {
             i += 1;
         }
         if flags & 1 != 0 {
-            let c = src[i];
+            let Some(&c) = src.get(i) else { break };
             i += 1;
             out.push(c);
             ring[r] = c;
@@ -135,6 +137,9 @@ fn lzss(data: &[u8]) -> Result<Vec<u8>> {
                 r = (r + 1) & 4095;
             }
         }
+    }
+    if out.len() < usize_ {
+        bail!("truncated lzss stream: got {} of {} bytes", out.len(), usize_);
     }
     out.truncate(usize_);
     Ok(out)
@@ -166,7 +171,8 @@ pub fn parse_devicetree(data: &[u8]) -> Result<Node> {
         let np = u32::from_le_bytes(d[*p..*p + 4].try_into()?) as usize;
         let nc = u32::from_le_bytes(d[*p + 4..*p + 8].try_into()?) as usize;
         *p += 8;
-        let mut props = Vec::with_capacity(np);
+        // Counts come from the file; cap the reservation by what the remaining bytes could hold.
+        let mut props = Vec::with_capacity(np.min(d.len().saturating_sub(*p) / 36));
         for _ in 0..np {
             if *p + 36 > d.len() {
                 bail!("truncated property");
@@ -180,7 +186,7 @@ pub fn parse_devicetree(data: &[u8]) -> Result<Node> {
             *p += (len + 3) & !3;
             props.push((name, v));
         }
-        let mut children = Vec::with_capacity(nc);
+        let mut children = Vec::with_capacity(nc.min(d.len().saturating_sub(*p) / 8));
         for _ in 0..nc {
             children.push(node(d, p)?);
         }
