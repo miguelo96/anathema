@@ -217,8 +217,8 @@ fn fake_kc() -> Vec<u8> {
     w32(&mut h, 0x0100_0007);
     w32(&mut h, 3);
     w32(&mut h, 0xc);
-    w32(&mut h, if std_entry() { 2 } else { 1 });
-    w32(&mut h, if std_entry() { 72 + 56 } else { 72 });
+    w32(&mut h, 3);
+    w32(&mut h, 72 + 152 + 56);
     w32(&mut h, 0);
     w32(&mut h, 0);
     // LC_SEGMENT_64 __TEXT
@@ -235,9 +235,34 @@ fn fake_kc() -> Vec<u8> {
     w32(&mut h, 5);
     w32(&mut h, 0);
     w32(&mut h, 0);
-    if !std_entry() {
-        return h;
-    }
+    // LC_SEGMENT_64 __PRELINK_INFO with an empty __info section: the kernel looks it up without a null check
+    w32(&mut h, 0x19);
+    w32(&mut h, 72 + 80);
+    let mut pn = [0u8; 16];
+    pn[..14].copy_from_slice(b"__PRELINK_INFO");
+    h.extend_from_slice(&pn);
+    w64(&mut h, KBASE + 0x20_0000 + 0x105_2000);
+    w64(&mut h, 0);
+    w64(&mut h, 0);
+    w64(&mut h, 0);
+    w32(&mut h, 3);
+    w32(&mut h, 3);
+    w32(&mut h, 1);
+    w32(&mut h, 0);
+    let mut sn = [0u8; 16];
+    sn[..6].copy_from_slice(b"__info");
+    h.extend_from_slice(&sn);
+    h.extend_from_slice(&pn);
+    w64(&mut h, KBASE + 0x20_0000 + 0x105_2000);
+    w64(&mut h, 0);
+    w32(&mut h, 0);
+    w32(&mut h, 0);
+    w32(&mut h, 0);
+    w32(&mut h, 0);
+    w32(&mut h, 0);
+    w32(&mut h, 0);
+    w32(&mut h, 0);
+    w32(&mut h, 0);
     // LC_FILESET_ENTRY com.apple.kernel
     w32(&mut h, 0x8000_0035);
     w32(&mut h, 56);
