@@ -472,6 +472,9 @@ fn dests(i: &Insn) -> Vec<u8> {
         Insn::Atomic { rt, rs, .. } => vec![rt, rs],
         Insn::Cas { rs, .. } => vec![rs],
         Insn::Pac { zero: Some(r) } => vec![r],
+        // FP/SIMD -> general register moves write a GPR too. Without these, a program could
+        // overwrite the x27/x28 base registers and send later loads/stores anywhere.
+        Insn::Umov { rd, .. } | Insn::FmovToG { rd, .. } | Insn::CvtFI { rd, .. } => vec![rd],
         _ => vec![],
     }
 }
@@ -578,11 +581,14 @@ pub fn gen_program_opts(rng: &mut Rng, n: usize, opts: &GenOpts) -> Vec<u32> {
             continue;
         }
         match i {
+            // LDP with Rt == Rt2 is CONSTRAINED UNPREDICTABLE (Apple CPUs make it UNDEFINED),
+            // for general and SIMD registers alike, so there is no single right answer to test.
             Insn::Ldp { rt, rt2, rn, mode, .. } => {
-                if rt == rt2 && rt != 31 || mode != Mode::Offset && (rt == rn || rt2 == rn) {
+                if rt == rt2 || mode != Mode::Offset && (rt == rn || rt2 == rn) {
                     continue;
                 }
             }
+            Insn::VLdp { rt, rt2, .. } if rt == rt2 => continue,
             Insn::Stp { rt, rt2, mode, rn, .. } => {
                 if mode != Mode::Offset && (rt == rn || rt2 == rn) {
                     continue;
