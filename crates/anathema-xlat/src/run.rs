@@ -252,9 +252,7 @@ impl Runner {
                 return Ok(());
             }
             let off = self.compile(f, pc)?;
-            let entry: extern "sysv64" fn(*mut Ctx, *const u8) -> u64 =
-                unsafe { core::mem::transmute(self.region.ptr.add(self.entry)) };
-            let st = entry(ctx as *mut Ctx, unsafe { self.region.ptr.add(off) });
+            let st = self.enter(ctx, off);
             if st != 0 {
                 return Err(format!("interp needed at {:x}", ctx.pc));
             }
@@ -270,13 +268,26 @@ impl Runner {
                 Err(e) if e == "hook" => return Stop::Interp(pc),
                 Err(e) => return Stop::Refused(e),
             };
-            let entry: extern "sysv64" fn(*mut Ctx, *const u8) -> u64 =
-                unsafe { core::mem::transmute(self.region.ptr.add(self.entry)) };
-            let st = entry(ctx as *mut Ctx, unsafe { self.region.ptr.add(off) });
+            let st = self.enter(ctx, off);
             if st != 0 {
                 return Stop::Interp(ctx.pc);
             }
         }
         Stop::Budget
+    }
+
+    /// Jump into translated code at `off`. Returns the exit status from the entry stub.
+    #[cfg(target_arch = "x86_64")]
+    fn enter(&self, ctx: &mut Ctx, off: usize) -> u64 {
+        let entry: extern "sysv64" fn(*mut Ctx, *const u8) -> u64 =
+            unsafe { core::mem::transmute(self.region.ptr.add(self.entry)) };
+        entry(ctx as *mut Ctx, unsafe { self.region.ptr.add(off) })
+    }
+
+    /// Translated code is x86-64, so it can only run on an x86-64 host. On other hosts the
+    /// crate still builds, so the decoder, emitter and translator can be unit-tested.
+    #[cfg(not(target_arch = "x86_64"))]
+    fn enter(&self, _ctx: &mut Ctx, _off: usize) -> u64 {
+        panic!("translated x86-64 code can only run on an x86-64 host");
     }
 }

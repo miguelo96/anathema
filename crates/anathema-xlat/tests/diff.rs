@@ -1,3 +1,7 @@
+// Runs translated x86-64 code and compares it with qemu-aarch64, so it only builds on x86-64
+// Linux. It also needs `qemu-aarch64` and `aarch64-linux-gnu-objdump` on PATH.
+#![cfg(all(target_arch = "x86_64", target_os = "linux"))]
+
 use anathema_xlat::oracle::*;
 use anathema_xlat::trans::{Config, MemModel};
 use std::process::Command;
