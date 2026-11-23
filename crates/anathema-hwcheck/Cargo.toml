@@ -1,0 +1,13 @@
+[package]
+name = "anathema-hwcheck"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "Check the translator against real arm64 hardware: record on an Apple silicon Mac, replay on x86-64 Linux"
+
+[dependencies]
+anathema-xlat = { path = "../anathema-xlat" }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

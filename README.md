@@ -106,6 +106,28 @@ Two kinds of check need more:
 * `cargo test -p anathema-xlat --test diff` (built only on x86-64 Linux) and `rt-boot fbcheck` run translated code and compare it with `qemu-aarch64`. They need an x86-64 Linux host with `qemu-aarch64` and `aarch64-linux-gnu-objdump` installed.
 * The boot path itself (the harness reaching `launchd`) needs your own IPSW, see below.
 
+### Checking the translator against real arm64 hardware
+
+QEMU is a good oracle, but it is still an emulator. `anathema-hwcheck` uses a real Apple silicon CPU instead. It generates random programs with the same generator as the QEMU diff tests, runs each one directly on the Mac's CPU, and saves inputs and outputs to a corpus file. The same programs are then replayed through the translator on x86-64 Linux, and every difference is printed.
+
+On an Apple silicon Mac:
+
+```
+cargo run --release -p anathema-hwcheck -- selftest                       # checks the recording harness itself
+cargo run --release -p anathema-hwcheck -- record --cases 5000 --out hw-corpus.bin
+cargo run --release -p anathema-hwcheck -- info hw-corpus.bin             # counts, and instructions the CPU refused
+```
+
+Copy `hw-corpus.bin` to an x86-64 Linux machine, then:
+
+```
+cargo run --release -p anathema-hwcheck -- replay hw-corpus.bin --model identity
+```
+
+`--model` can be `identity`, `kernel` (the runtime's register pinning), `biased` or `checked`. `--strict` also counts differences that are only in NaN payloads or signs, which the default comparison hides.
+
+A case the CPU rejected with SIGILL but the translator ran anyway means the decoder accepts an encoding that real hardware treats as undefined. Those are reported too. Corpora aren't committed (`hw-corpus*.bin` is gitignored). Recording 5000 cases takes well under a second.
+
 ## Contributing
 
 Issues and patches are welcome, and outside review especially. If you find a bug, an issue with the file and line and a short explanation is already a big help. For anything larger, open an issue first so work doesn't overlap. New tests are always welcome, especially for parsers and the instruction decoder.

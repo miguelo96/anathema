@@ -1,1 +1,3 @@
 /target
+# anathema-hwcheck corpora (regenerate with `anathema-hwcheck record`)
+hw-corpus*.bin

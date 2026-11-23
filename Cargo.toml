@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/anathema-boot",
+    "crates/anathema-hwcheck",
     "crates/anathema-media",
     "crates/anathema-rt",
     "crates/anathema-setup",
