@@ -371,7 +371,13 @@ fn judge(number: u32, system: bool, bus: u32, removable: bool, bytes: u64) -> (b
     if bytes < 1_000_000_000 {
         return (false, "smaller than 1 GB".into());
     }
-    (true, format!("removable {}", bus_name(bus)))
+    if removable || virt {
+        (true, format!("removable {}", bus_name(bus)))
+    } else {
+        // Some real sticks report themselves as fixed, so these stay selectable, but say so
+        // plainly: external SSDs and backup drives look exactly like this.
+        (true, format!("fixed {} drive, not a stick: check this is not a backup disk", bus_name(bus)))
+    }
 }
 
 pub fn refresh_one(number: u32) -> Result<Disk, String> {

@@ -348,7 +348,7 @@ impl App {
         heading(
             ui,
             "Choose the USB stick",
-            "Only removable USB sticks can be selected. The Windows disk is locked.",
+            "USB sticks and USB drives up to 256 GB can be selected. The Windows disk is locked. Unplug every USB drive you don't want erased.",
         );
         if let Some(error) = &self.scan_error {
             ui.colored_label(EMBER, format!("could not list disks: {error}"));
@@ -383,7 +383,7 @@ impl App {
                     } else {
                         format!("locked: {}", disk.reason)
                     };
-                    let color = if disk.selectable { DIM } else { EMBER_DIM };
+                    let color = if disk.selectable && disk.removable { DIM } else { EMBER_DIM };
                     ui.label(RichText::new(note).color(color).size(13.0));
                 });
                 if disk.selectable && response.interact(egui::Sense::click()).clicked() {
@@ -410,6 +410,28 @@ impl App {
             ui.label(
                 RichText::new(format!("Target: disk {}  {}  ({})", disk.number, disk.model, gb(disk.bytes))).strong(),
             );
+            if !disk.removable {
+                ui.colored_label(
+                    EMBER,
+                    "This is a fixed USB drive, not a stick. External SSDs and backup drives look like this. Make sure it is the right disk.",
+                );
+            }
+            // Show what is on the disk now, so a wrong pick is obvious before anything is erased.
+            if disk.parts.is_empty() {
+                ui.label(RichText::new("No partitions on this disk").color(DIM).size(13.0));
+            } else {
+                ui.label(RichText::new("On this disk now:").color(DIM).size(13.0));
+                for p in &disk.parts {
+                    let letter = p.letter.map(|l| format!("{l}:")).unwrap_or_else(|| "--".into());
+                    let label = if p.label.is_empty() { "(no label)" } else { p.label.as_str() };
+                    let fs = match (p.letter, p.fs.is_empty()) {
+                        (None, _) => "no drive letter",
+                        (Some(_), true) => "unformatted",
+                        (Some(_), false) => p.fs.as_str(),
+                    };
+                    ui.label(RichText::new(format!("{letter}  {label}  {fs}  {}", gb(p.length))).size(13.0));
+                }
+            }
         });
         if has_esp {
             ui.horizontal(|ui| {
