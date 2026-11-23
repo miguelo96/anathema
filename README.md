@@ -6,6 +6,8 @@ An experiment in booting arm64 macOS on an x86-64 PC by translating the arm64 ke
 
 **Nothing here boots to a macOS desktop.** See [Status](#status) for exactly how far it gets.
 
+**New here?** Read the [FAQ](FAQ.md) first: what this is, whether you can try it, which hardware matters and how to help. Feature ideas live in the [ideas repo](https://github.com/riftaway7-code/anathema-ideas) ([sorted index](https://github.com/riftaway7-code/anathema-ideas/blob/main/INDEX.md)).
+
 ## What it is
 
 Anathema targets the **VirtualMac2,1 (`vma2macosap`)** build of macOS 27.2. That is the kernel Apple ships for macOS virtual machines. It has no SPTM and no TXM, runs on a fairly plain virtual platform (GICv3, PL011 UART, PL031 RTC, virtio PCIe devices) and is the easiest arm64 macOS to bring up without Apple silicon.
@@ -84,6 +86,29 @@ cargo build --release -p anathema-boot --target x86_64-unknown-uefi
 ```
 
 The toolchain is pinned in `rust-toolchain.toml`.
+
+## Testing
+
+Unit tests run on any host, including Apple silicon Macs. They need no Apple software, no QEMU and no network:
+
+```
+cargo test -p anathema-media                   # IPSW parsers: plist, zip, IM4P/DER, LZSS, device tree
+cargo test -p anathema-xlat                    # arm64 decoder and x86-64 emitter (the QEMU diff test is skipped off x86-64 Linux)
+cargo test -p anathema-rt --test mmu_and_memory   # software MMU, guest loads/stores, device tree builder
+```
+
+The parser tests feed each parser corrupt input as well as good input. A bad file must give an error, never a panic.
+
+Tests marked `#[ignore = "known bug: ..."]` describe a bug that is known and not fixed yet. `cargo test -- --ignored` runs them, and they should fail until the bug is fixed. Remove the `ignore` in the same change as the fix.
+
+Two kinds of check need more:
+
+* `cargo test -p anathema-xlat --test diff` (built only on x86-64 Linux) and `rt-boot fbcheck` run translated code and compare it with `qemu-aarch64`. They need an x86-64 Linux host with `qemu-aarch64` and `aarch64-linux-gnu-objdump` installed.
+* The boot path itself (the harness reaching `launchd`) needs your own IPSW, see below.
+
+## Contributing
+
+Issues and patches are welcome, and outside review especially. If you find a bug, an issue with the file and line and a short explanation is already a big help. For anything larger, open an issue first so work doesn't overlap. New tests are always welcome, especially for parsers and the instruction decoder.
 
 ## Running the harness
 
