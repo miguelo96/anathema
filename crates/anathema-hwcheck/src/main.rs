@@ -19,7 +19,7 @@ use std::process::ExitCode;
 
 const USAGE: &str = "\
 usage:
-  anathema-hwcheck record [--cases N] [--seed S] [--max-len L] [--out FILE]   (Apple silicon Mac)
+  anathema-hwcheck record [--cases N] [--seed S] [--max-len L] [--out FILE] [--fp-specials]   (Apple silicon Mac)
   anathema-hwcheck replay FILE [--model identity|biased|checked|kernel] [--show N] [--strict] [--trace] [--only N]   (x86-64 Linux)
   anathema-hwcheck info FILE
   anathema-hwcheck show FILE N   (one case: program, inputs, hardware result)
@@ -125,6 +125,9 @@ fn record(args: &[String]) -> Result<ExitCode, String> {
     let seed: u64 = arg(args, "--seed", 0x5eed_0001)?;
     let max_len: usize = arg(args, "--max-len", 16)?;
     let out: String = arg(args, "--out", "hw-corpus.bin".to_string())?;
+    // The stock generator never produces NaN or infinity inputs (it clears the top exponent
+    // bit). --fp-specials seeds vector registers with ±0, ±inf, quiet and signalling NaNs.
+    let fp_specials = args.iter().any(|a| a == "--fp-specials");
     if max_len == 0 || max_len > MAXW {
         return Err(format!("--max-len must be 1..={MAXW}"));
     }
@@ -147,19 +150,39 @@ fn record(args: &[String]) -> Result<ExitCode, String> {
         }
     }
 
-    let header = m.header(host);
+    let header = m.header(if fp_specials { format!("{host} [fp-specials]") } else { host });
     let f = File::create(&out).map_err(|e| format!("{out}: {e}"))?;
     let mut w = BufWriter::new(f);
     corpus::write_header(&mut w, &header).map_err(|e| e.to_string())?;
 
     let base = header.data + (BASEREG - DATA);
     let mut rng = Rng(seed);
+    let mut special_rng = Rng(seed ^ 0x5bec_1a15);
+    const SPECIAL_D: [u64; 12] = [
+        0, 1 << 63, 0x7ff0_0000_0000_0000, 0xfff0_0000_0000_0000, // ±0, ±inf
+        0x7ff8_0000_0000_0000, 0xfff8_0000_0000_0000, 0x7ff8_0000_dead_beef, 0xfffc_0000_0000_1234, // quiet NaNs
+        0x7ff0_0000_0000_0001, 0xfff4_0000_0000_0bad, // signalling NaNs
+        0x3ff0_0000_0000_0000, 0xbff0_0000_0000_0000, // ±1.0
+    ];
+    const SPECIAL_S: [u32; 12] = [
+        0, 1 << 31, 0x7f80_0000, 0xff80_0000, 0x7fc0_0000, 0xffc0_0000, 0x7fc0_beef, 0xffe0_1234, 0x7f80_0001, 0xffa0_0bad,
+        0x3f80_0000, 0xbf80_0000,
+    ];
     let (mut ran, mut faulted, mut nondet) = (0, 0, 0);
     for i in 0..cases {
         let opts = GenOpts { sp_base: i % 2 == 1 };
         let n = 1 + rng.below(max_len as u64) as usize;
         let words = gen_program_opts(&mut rng, n, &opts);
         let (mut st, win) = gen_state_opts(&mut rng, &opts);
+        if fp_specials {
+            for q in st.q.iter_mut() {
+                match special_rng.below(3) {
+                    0 => q[..8].copy_from_slice(&SPECIAL_D[special_rng.below(12) as usize].to_le_bytes()),
+                    1 => q[..4].copy_from_slice(&SPECIAL_S[special_rng.below(12) as usize].to_le_bytes()),
+                    _ => {}
+                }
+            }
+        }
         st.x[28] = base;
         if opts.sp_base {
             st.sp = base;

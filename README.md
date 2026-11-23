@@ -124,7 +124,7 @@ Copy `hw-corpus.bin` to an x86-64 Linux machine, then:
 cargo run --release -p anathema-hwcheck -- replay hw-corpus.bin --model identity
 ```
 
-`--model` can be `identity`, `kernel` (the runtime's register pinning), `biased` or `checked`. `--strict` also counts differences that are only in NaN payloads or signs, which the default comparison hides.
+`record --fp-specials` seeds the vector registers with ±0, ±infinity and quiet and signalling NaNs, which the stock generator never produces. `--model` can be `identity`, `kernel` (the runtime's register pinning), `biased` or `checked`. `--strict` also counts differences that are only in NaN payloads or signs, which the default comparison hides.
 
 A case the CPU rejected with SIGILL but the translator ran anyway means the decoder accepts an encoding that real hardware treats as undefined. Those are reported too. Corpora aren't committed (`hw-corpus*.bin` is gitignored). Recording 5000 cases takes well under a second.
 
