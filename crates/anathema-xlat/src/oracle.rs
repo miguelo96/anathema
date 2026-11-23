@@ -327,6 +327,8 @@ pub fn encode_b(from: u64, to: u64) -> u32 {
 pub struct Native {
     pub runner: Runner,
     bias: u64,
+    data: u64,
+    code: u64,
     _data: Region,
     _code: Region,
 }
@@ -340,20 +342,29 @@ impl Native {
         Native::with_cfg(Config::new(mem))
     }
 
-    pub fn with_cfg(mut cfg: Config) -> Native {
-        cfg.pc_base = CODE;
+    pub fn with_cfg(cfg: Config) -> Native {
+        Native::at(cfg, DATA, CODE)
+    }
+
+    /// Like `with_cfg`, but with the guest data region at `data` (64 KiB, window at
+    /// `data + WIN_ADDR - DATA`) and the guest code at `code` (page aligned). Used to replay
+    /// cases recorded at other addresses, e.g. on real arm64 hardware.
+    pub fn at(mut cfg: Config, data: u64, code: u64) -> Native {
+        cfg.pc_base = code;
         let bias = if cfg.mem == MemModel::Identity { 0 } else { cfg.bias };
-        let data = Region::fixed((DATA + bias) as usize, 0x10000, false).expect("map data");
-        let code = Region::fixed((CODE + bias) as usize, 0x1000, false).expect("map code");
-        Native { runner: Runner::new(cfg), bias, _data: data, _code: code }
+        let data_r = Region::fixed((data + bias) as usize, 0x10000, false).expect("map data");
+        let code_r = Region::fixed((code + bias) as usize, 0x1000, false).expect("map code");
+        Native { runner: Runner::new(cfg), bias, data, code, _data: data_r, _code: code_r }
     }
 
     pub fn run(&mut self, st: &State, win: &[u8], words: &[u32]) -> Result<(State, Vec<u8>), String> {
+        let (data, code) = (self.data + self.bias, self.code);
+        let win_addr = data + (WIN_ADDR - DATA);
         unsafe {
-            std::ptr::write_bytes((DATA + self.bias) as *mut u8, 0, 0x10000);
-            std::ptr::copy_nonoverlapping(win.as_ptr(), (WIN_ADDR + self.bias) as *mut u8, WIN_LEN);
+            std::ptr::write_bytes(data as *mut u8, 0, 0x10000);
+            std::ptr::copy_nonoverlapping(win.as_ptr(), win_addr as *mut u8, WIN_LEN);
             for (i, w) in words.iter().enumerate() {
-                *(((CODE + self.bias) as *mut u32).add(i)) = *w;
+                *(((code + self.bias) as *mut u32).add(i)) = *w;
             }
         }
         self.runner.reset_cache();
@@ -363,16 +374,16 @@ impl Native {
         }
         ctx.q = st.q;
         ctx.x[31] = st.sp;
-        ctx.pc = CODE;
+        ctx.pc = code;
         ctx.flags = nzcv_to_flags(st.nzcv, self.runner.cfg.eflags_base as u64);
-        let w = Words { base: CODE, words };
-        let end = CODE + 4 * words.len() as u64;
+        let w = Words { base: code, words };
+        let end = code + 4 * words.len() as u64;
         self.runner.run(&mut ctx, &w, end, 100)?;
         let mut s = State { x: [0; 31], sp: ctx.x[31], nzcv: flags_to_nzcv(ctx.flags), q: ctx.q };
         s.x.copy_from_slice(&ctx.x[..31]);
         let mut win_out = vec![0u8; WIN_LEN];
         unsafe {
-            std::ptr::copy_nonoverlapping((WIN_ADDR + self.bias) as *const u8, win_out.as_mut_ptr(), WIN_LEN);
+            std::ptr::copy_nonoverlapping(win_addr as *const u8, win_out.as_mut_ptr(), WIN_LEN);
         }
         Ok((s, win_out))
     }
