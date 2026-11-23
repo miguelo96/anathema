@@ -163,12 +163,17 @@ pub fn simd(w: u32) -> Insn {
                 (0, 3) => Insn::CvtIF { sf, ftype: ftype as u8, rd, rn, signed: false },
                 (3, 0) => Insn::CvtFI { sf, ftype: ftype as u8, rd, rn, signed: true },
                 (3, 1) => Insn::CvtFI { sf, ftype: ftype as u8, rd, rn, signed: false },
-                (0, 6) => Insn::FmovToG { sf, ftype: ftype as u8, top: false, rd, rn },
-                (0, 7) => Insn::FmovFromG { sf, ftype: ftype as u8, top: false, rd, rn },
+                // FMOV general<->FP only pairs W with S and X with D.
+                (0, 6) if sf == (ftype == 1) => Insn::FmovToG { sf, ftype: ftype as u8, top: false, rd, rn },
+                (0, 7) if sf == (ftype == 1) => Insn::FmovFromG { sf, ftype: ftype as u8, top: false, rd, rn },
                 (1, 6) if ftype == 2 && sf => Insn::FmovToG { sf, ftype: 1, top: true, rd, rn },
                 (1, 7) if ftype == 2 && sf => Insn::FmovFromG { sf, ftype: 1, top: true, rd, rn },
                 _ => Insn::Unsup("fp-conv"),
             };
+        }
+        // Outside the int<->fp conversions, bit 31 is M and must be 0.
+        if sf {
+            return Insn::Unsup("fp-m");
         }
         if ftype >= 2 {
             return Insn::Unsup("fp-half");
@@ -181,8 +186,9 @@ pub fn simd(w: u32) -> Insn {
                 1 => Insn::Fp1 { ftype: ft, op: 1, rd, rn },
                 2 => Insn::Fp1 { ftype: ft, op: 2, rd, rn },
                 3 => Insn::Fp1 { ftype: ft, op: 3, rd, rn },
-                4 if ftype == 0 => Insn::Fcvt { from: 0, to: 1, rd, rn },
-                5 if ftype == 1 => Insn::Fcvt { from: 1, to: 0, rd, rn },
+                // Opcode names the destination: 4 = to single, 5 = to double.
+                5 if ftype == 0 => Insn::Fcvt { from: 0, to: 1, rd, rn },
+                4 if ftype == 1 => Insn::Fcvt { from: 1, to: 0, rd, rn },
                 _ => Insn::Unsup("fp-1src"),
             };
         }
@@ -214,6 +220,9 @@ pub fn simd(w: u32) -> Insn {
     }
     if w & 0x7f000000 == 0x1f000000 {
         let ftype = bits(w, 23, 22);
+        if w >> 31 != 0 {
+            return Insn::Unsup("fp-m");
+        }
         if ftype >= 2 {
             return Insn::Unsup("fp-half");
         }
@@ -251,10 +260,11 @@ pub fn simd(w: u32) -> Insn {
         let size = imm5.trailing_zeros() as u8;
         let idx = (imm5 >> (size + 1)) as u8;
         return match (op, imm4) {
-            (0, 1) => Insn::VDupG { q, size, rd, rn },
+            // 64-bit elements need Q=1 (.1D is reserved); INS (general) is Q=1 only.
+            (0, 1) if size < 3 || q => Insn::VDupG { q, size, rd, rn },
             (0, 7) if (size == 3 && q) || (size < 3 && !q) => Insn::Umov { sf: size == 3, size, idx, rd, rn },
-            (0, 3) => Insn::InsG { size, idx, rd, rn },
-            (0, 0) => Insn::VDupE { q, size, idx, rd, rn },
+            (0, 3) if q => Insn::InsG { size, idx, rd, rn },
+            (0, 0) if size < 3 || q => Insn::VDupE { q, size, idx, rd, rn },
             _ => Insn::Unsup("vec-copy"),
         };
     }

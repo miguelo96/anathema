@@ -589,6 +589,11 @@ fn ldst(w: u32) -> Insn {
         };
     }
     if w & 0x3f200c00 == 0x19000000 {
+        // RCpc unscaled (LDAPUR/STLUR family). Unlike the ordinary unscaled form, size=11
+        // with opc=1x is unallocated here, not PRFUM.
+        if size == 3 && bits(w, 23, 22) >= 2 {
+            return Insn::Unsup("rcpc-bad");
+        }
         let imm9 = sext(bits(w, 20, 12), 9);
         return mkldst(size, bits(w, 23, 22), rt as u8, rsp(rn), Addr::Imm { off: imm9, mode: Mode::Offset });
     }
@@ -804,7 +809,16 @@ fn dp_reg(w: u32) -> Insn {
         let opcode2 = rm;
         let (rd8, rn8) = (rd as u8, rn as u8);
         if opcode2 == 1 {
-            return Insn::Pac { zero: None };
+            // PAC group, 64-bit only. Opcodes 0-7 (PACIA..AUTDB) take a modifier in Rn; the
+            // zero-modifier forms (8-15) and XPACI/XPACD (16, 17) need Rn = 31. The rest is
+            // unallocated (checked against an Apple M3: all of it raises SIGILL).
+            let ok = sf
+                && match opcode {
+                    0..=7 => true,
+                    8..=17 => rn == 31,
+                    _ => false,
+                };
+            return if ok { Insn::Pac { zero: None } } else { Insn::Unsup("pac-bad") };
         }
         if opcode2 != 0 {
             return Insn::Unsup("dp1-bad");

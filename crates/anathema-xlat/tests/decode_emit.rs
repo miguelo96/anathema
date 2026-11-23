@@ -109,16 +109,81 @@ fn loads_and_stores() {
     ));
 }
 
-/// Review finding: FCVT between single and double has the opcode/ftype pairing swapped.
-/// Opcode bits 20:15 name the *destination* type, so `fcvt d0, s1` is ftype 0 with opcode 5.
-/// Today the real encodings decode as Unsup (slow but correct, via the interpreter) and the
-/// unallocated ones (`0x1e224020`) decode as conversions instead of UNDEFINED.
+/// FCVT between single and double: opcode bits 20:15 name the *destination* type, so
+/// `fcvt d0, s1` is ftype 0 with opcode 5. Same-type pairs are unallocated.
 #[test]
-#[ignore = "known bug: FCVT single/double decode (see review notes)"]
 fn fcvt_between_single_and_double() {
     assert_eq!(decode(0x1E22_C020), Insn::Fcvt { from: 0, to: 1, rd: 0, rn: 1 }); // fcvt d0, s1
     assert_eq!(decode(0x1E62_4000), Insn::Fcvt { from: 1, to: 0, rd: 0, rn: 0 }); // fcvt s0, d0
-    assert!(matches!(decode(0x1E22_4020), Insn::Unsup(_))); // unallocated
+    assert!(matches!(decode(0x1E22_4020), Insn::Unsup(_))); // fcvt s, s: unallocated
+}
+
+/// Encodings an Apple M3 Pro rejected with SIGILL in `anathema-hwcheck` corpora. The decoder
+/// must not turn any of them into an instruction (the translator would run code the CPU
+/// treats as undefined). Each group is followed by valid neighbours that must still decode.
+#[test]
+fn encodings_real_hardware_rejects_are_undefined() {
+    let rejected: &[(u32, &str)] = &[
+        // RCpc unscaled load/store (LDAPUR/STLUR family): size=11 with opc=1x is unallocated.
+        (0xd99e_53a6, "rcpc size=11 opc=10"),
+        (0xd98c_41b5, "rcpc size=11 opc=10"),
+        (0xd98c_f307, "rcpc size=11 opc=10"),
+        // Data-processing (1 source), PAC group (opcode2 = 00001).
+        (0x5ac1_54bb, "pac with sf=0"),
+        (0x5ac1_0272, "pacia with sf=0"),
+        (0xdac1_2036, "paciza with Rn != 31"),
+        (0xdac1_3853, "autdza with Rn != 31"),
+        (0xdac1_4826, "pac opcode 010010"),
+        (0xdac1_80aa, "pac opcode 100000"),
+        (0xdac1_abe4, "pac opcode 101010, Rn = 31"),
+        // FMOV between general and FP registers needs W<->S or X<->D.
+        (0x9e26_0035, "fmov x, s"),
+        (0x9e26_0324, "fmov x, s"),
+        (0x1e66_023c, "fmov w, d"),
+        (0x1e66_003a, "fmov w, d"),
+        // DUP (general) with a 64-bit element needs Q=1 (.2D); .1D is reserved.
+        (0x0e08_0fa9, "dup v.1d, x"),
+        (0x0e18_0cd2, "dup v.1d, x"),
+        // FCVT same-type pairs.
+        (0x1e62_c0c8, "fcvt d, d"),
+        (0x1e62_c047, "fcvt d, d"),
+        (0x1e22_4025, "fcvt s, s"),
+    ];
+    for &(w, what) in rejected {
+        let d = decode(w);
+        assert!(matches!(d, Insn::Unsup(_)), "{w:08x} ({what}) decoded as {d:?}, hardware says undefined");
+    }
+
+    // Valid neighbours.
+    assert!(matches!(decode(0xd940_0020), Insn::Ld { size: 3, rt: 0, rn: 1, .. })); // ldapur x0, [x1]
+    assert!(matches!(decode(0xd900_0020), Insn::St { size: 3, rt: 0, rn: 1, .. })); // stlur x0, [x1]
+    assert!(matches!(decode(0x9980_0020), Insn::Ld { size: 2, .. })); // ldapursw x0, [x1]
+    assert_eq!(decode(0xf980_0000), Insn::Prfm); // prfm pldl1keep, [x0] (ordinary prfm is fine)
+    assert_eq!(decode(0xdac1_0020), Insn::Pac { zero: None }); // pacia x0, x1
+    assert_eq!(decode(0xdac1_1c20), Insn::Pac { zero: None }); // autdb x0, x1
+    assert_eq!(decode(0xdac1_23e0), Insn::Pac { zero: None }); // paciza x0
+    assert_eq!(decode(0xdac1_3fe0), Insn::Pac { zero: None }); // autdzb x0
+    assert_eq!(decode(0xdac1_43e0), Insn::Pac { zero: None }); // xpaci x0
+    assert_eq!(decode(0xdac1_47e0), Insn::Pac { zero: None }); // xpacd x0
+    assert!(matches!(decode(0x1e26_0020), Insn::FmovToG { sf: false, ftype: 0, top: false, .. })); // fmov w0, s1
+    assert!(matches!(decode(0x9e66_0020), Insn::FmovToG { sf: true, ftype: 1, top: false, .. })); // fmov x0, d1
+    assert!(matches!(decode(0x9e67_0020), Insn::FmovFromG { sf: true, ftype: 1, top: false, .. })); // fmov d0, x1
+    assert!(matches!(decode(0x9eaf_0020), Insn::FmovFromG { top: true, .. })); // fmov v0.d[1], x1
+    assert!(matches!(decode(0x1e62_0020), Insn::CvtIF { sf: false, ftype: 1, .. })); // scvtf d0, w1: any sf is fine
+    assert!(matches!(decode(0x9e38_0020), Insn::CvtFI { sf: true, ftype: 0, .. })); // fcvtzs x0, s1: any sf is fine
+    assert!(matches!(decode(0x4e08_0c20), Insn::VDupG { q: true, size: 3, .. })); // dup v0.2d, x1
+    assert!(matches!(decode(0x0e01_0c20), Insn::VDupG { q: false, size: 0, .. })); // dup v0.8b, w1
+}
+
+/// Other reserved encodings in the same tables, per the Arm ARM (not yet seen in a corpus).
+#[test]
+fn reserved_simd_fp_encodings_are_undefined() {
+    assert!(matches!(decode(0x9e22_2820), Insn::Unsup(_))); // fadd with M (bit 31) set
+    assert!(matches!(decode(0x1e22_2820), Insn::Fp2 { .. })); // fadd s0, s1, s2
+    assert!(matches!(decode(0x0e08_0420), Insn::Unsup(_))); // dup v0.1d, v1.d[0]: reserved
+    assert!(matches!(decode(0x4e08_0420), Insn::VDupE { q: true, size: 3, .. })); // dup v0.2d, v1.d[0]
+    assert!(matches!(decode(0x0e01_1c20), Insn::Unsup(_))); // ins with Q=0: unallocated
+    assert!(matches!(decode(0x4e01_1c20), Insn::InsG { size: 0, .. })); // ins v0.b[0], w1
 }
 
 #[test]
