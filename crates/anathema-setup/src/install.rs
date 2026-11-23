@@ -25,6 +25,22 @@ pub struct Context<'a> {
 pub const ESP_BYTES: u64 = 200 << 20;
 const MIB: u64 = 1 << 20;
 
+/// Full path to a program in the Windows system directory (normally `C:\Windows\System32`).
+///
+/// This process runs elevated, so system tools must never be started by bare name: Windows
+/// looks in the folder of the running exe first (usually Downloads), so a stray `format.com`
+/// there would run as administrator.
+fn system_tool(name: &str) -> std::io::Result<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
+    let mut buf = [0u16; 260];
+    let n = unsafe { GetSystemDirectoryW(buf.as_mut_ptr(), buf.len() as u32) } as usize;
+    if n == 0 || n >= buf.len() {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(PathBuf::from(std::ffi::OsString::from_wide(&buf[..n])).join(name))
+}
+
 pub fn data_volume(disk: &Disk) -> Option<&Part> {
     disk.parts
         .iter()
@@ -275,9 +291,11 @@ pub fn fresh_install(disk: &Disk, efi: &[u8], ctx: &mut Context) -> Result<(), S
             });
             if let Some(letter) = letter {
                 {
-                    let out = Command::new("format.com")
-                        .args([&format!("{letter}:"), "/FS:exFAT", "/V:ANATHEMA", "/Q", "/Y"])
-                        .output();
+                    let out = system_tool("format.com").and_then(|format| {
+                        Command::new(format)
+                            .args([&format!("{letter}:"), "/FS:exFAT", "/V:ANATHEMA", "/Q", "/Y"])
+                            .output()
+                    });
                     match out {
                         Ok(o) if o.status.success() => {
                             (ctx.log)(format!("Data partition formatted exFAT as {letter}:"));
