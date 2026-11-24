@@ -300,3 +300,40 @@ mod task7 {
         assert_eq!(ours, report.files);
     }
 }
+
+/// A reader that counts the bytes taken from it.
+struct Counting(Cursor<Vec<u8>>, std::sync::Arc<std::sync::atomic::AtomicU64>);
+impl Read for Counting {
+    fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.0.read(b)?;
+        self.1.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+        Ok(n)
+    }
+}
+
+#[test]
+fn pbzx_bounds_chunks_in_flight() {
+    // 50 stored 64 KiB chunks; nobody reads the output for a while
+    let chunk = noise(64 << 10, 9);
+    let chunks: Vec<(&[u8], bool)> = (0..50).map(|_| (&chunk[..], false)).collect();
+    let file = pbzx_file(&chunks);
+    let taken = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let mut p = Pbzx::new(Counting(Cursor::new(file), taken.clone()), 2).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let read = taken.load(std::sync::atomic::Ordering::Relaxed);
+    let per_chunk = 16 + chunk.len() as u64;
+    assert!(read <= 12 + 4 * per_chunk + per_chunk, "read {} chunks ahead of the consumer", read / per_chunk);
+    let mut out = Vec::new();
+    p.read_to_end(&mut out).unwrap();
+    assert_eq!(out.len(), 50 * chunk.len());
+}
+
+#[test]
+fn pbzx_dropped_early_does_not_hang() {
+    let chunk = noise(64 << 10, 10);
+    let chunks: Vec<(&[u8], bool)> = (0..50).map(|_| (&chunk[..], false)).collect();
+    let mut p = Pbzx::new(Cursor::new(pbzx_file(&chunks)), 2).unwrap();
+    let mut one = [0u8; 10];
+    p.read_exact(&mut one).unwrap();
+    drop(p);
+}

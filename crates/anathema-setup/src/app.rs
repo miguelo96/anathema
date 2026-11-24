@@ -4,6 +4,7 @@ use crate::disk::{self, Disk};
 use crate::install::{self, Mode};
 use crate::logo::{self, EMBER, EMBER_DIM};
 use anathema_setup::kernel_files::{self, KernelFiles};
+use anathema_setup::stick::{same_stick, StickId};
 use eframe::egui::{self, Color32, FontId, RichText, Stroke};
 use std::{
     path::PathBuf,
@@ -155,6 +156,10 @@ impl App {
     }
 }
 
+fn stick_id(d: &Disk) -> StickId {
+    StickId { model: d.model.clone(), bytes: d.bytes, bus: d.bus, parts: d.parts.iter().map(|p| (p.offset, p.length, p.kind)).collect() }
+}
+
 fn download_note() -> String {
     format!(
         "Downloads about {:.1} GB of Apple kernel files from dortania's GitHub releases (once) and builds the kernel files on this PC",
@@ -200,6 +205,16 @@ fn run_install(
         std::fs::create_dir_all(&cache).map_err(|e| format!("cannot create {}: {e}", cache.display()))?;
         let free = disk::free_bytes(&cache.display().to_string());
         kernel_files::prepare(&cache, free, &mut |value, stage| progress(0.6 * value, stage), &mut log)?
+    };
+    // preparing can take many minutes: the stick must still be the one that was picked, and its
+    // drive letters are read again
+    let fresh;
+    let disk = if dry_run {
+        disk
+    } else {
+        fresh = disk::refresh_one(disk.number)?;
+        same_stick(&stick_id(disk), &stick_id(&fresh))?;
+        &fresh
     };
     let files = kernel_files::esp_files(&efi, &kernel);
     let mut install_progress = |value: f32, stage: &str| progress(0.6 + 0.4 * value, stage);

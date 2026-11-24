@@ -124,3 +124,86 @@ fn kc_config_matches_mkkc() {
     assert_eq!(c.codeless, ["com.apple.driver.AppleMobileFileIntegrity"]);
     assert!(c.no_start.is_empty() && c.set_true.is_empty() && c.rename.is_empty() && c.add_lib.is_empty() && c.overrides.is_empty());
 }
+
+mod review_fixes {
+    use super::*;
+    use anathema_media::kdk::extract::MARKER;
+    use anathema_media::kdk::pin::{KDK_27, KDK_TAHOE};
+    use anathema_setup::kernel_files::{space_needed, stamp_inputs, update_order, PIN_FILE};
+    use anathema_setup::stick::{same_stick, StickId};
+
+    fn mark(tree: &Path, sha: &str) {
+        std::fs::create_dir_all(tree).unwrap();
+        std::fs::write(tree.join(MARKER), b"files 1\nbytes 1\n").unwrap();
+        std::fs::write(tree.join(PIN_FILE), sha).unwrap();
+    }
+
+    #[test]
+    fn stamp_covers_the_linker_source() {
+        let text = stamp_inputs();
+        let line = text.lines().find(|l| l.starts_with("linker-source ")).expect("linker source line");
+        let hash = line.trim_start_matches("linker-source ");
+        assert_eq!(hash.len(), 16, "{line}");
+        assert!(hash.bytes().all(|b| b.is_ascii_hexdigit()), "{line}");
+    }
+
+    #[test]
+    fn tree_from_another_pin_is_unpacked_again() {
+        let cache = temp("otherpin");
+        mark(&cache.join(KDK_TAHOE.build), "an older sha256");
+        mark(&cache.join(KDK_27.build), KDK_27.sha256);
+        let err = prepare_with(&cache, u64::MAX, &mut refusing_fetch(), &mut |_, _| {}, &mut |_| {}).err().unwrap();
+        assert_eq!(err, "fetch called for 25G342");
+    }
+
+    #[test]
+    fn space_needed_starts_near_the_peak() {
+        let need = space_needed(&temp("space-fresh"));
+        assert!((3_300_000_000..=3_800_000_000).contains(&need), "{need}");
+    }
+
+    #[test]
+    fn space_needed_counts_what_is_already_cached() {
+        let cache = temp("space-resume");
+        mark(&cache.join(KDK_TAHOE.build), KDK_TAHOE.sha256);
+        let part = std::fs::File::create(cache.join(format!("{}.dmg.part", KDK_27.build))).unwrap();
+        part.set_len(KDK_27.size / 2).unwrap();
+        let need = space_needed(&cache);
+        assert!(need < 2_200_000_000, "{need}");
+        // the reviewer's case: 2.4 GB free goes on to the download instead of refusing
+        let err = prepare_with(&cache, 2_400_000_000, &mut refusing_fetch(), &mut |_, _| {}, &mut |_| {}).err().unwrap();
+        assert_eq!(err, "fetch called for 26B131");
+    }
+
+    #[test]
+    fn update_writes_the_loader_last() {
+        let k = KernelFiles { xkernel: vec![1], xkc: vec![2] };
+        let files = esp_files(b"efi", &k);
+        let order: Vec<&str> = update_order(&files).iter().map(|f| f.path).collect();
+        assert_eq!(order, ["anathema/xkernel", "anathema/xkc.bin", "anathema/xcp.bin", "EFI/BOOT/BOOTX64.EFI"]);
+    }
+
+    fn id(model: &str, bytes: u64, parts: &[(u64, u64)]) -> StickId {
+        StickId { model: model.into(), bytes, bus: 7, parts: parts.iter().map(|&(o, l)| (o, l, [0u8; 16])).collect() }
+    }
+
+    #[test]
+    fn same_stick_accepts_the_same_disk() {
+        let a = id("SanDisk Ultra", 32_000_000_000, &[(1 << 20, 200 << 20)]);
+        assert!(same_stick(&a, &a.clone()).is_ok());
+    }
+
+    #[test]
+    fn same_stick_rejects_a_swapped_disk() {
+        let a = id("SanDisk Ultra", 32_000_000_000, &[(1 << 20, 200 << 20)]);
+        for b in [
+            id("Kingston DataTraveler", 32_000_000_000, &[(1 << 20, 200 << 20)]),
+            id("SanDisk Ultra", 31_000_000_000, &[(1 << 20, 200 << 20)]),
+            id("SanDisk Ultra", 32_000_000_000, &[(1 << 20, 100 << 20)]),
+            id("SanDisk Ultra", 32_000_000_000, &[]),
+        ] {
+            let err = same_stick(&a, &b).unwrap_err();
+            assert!(err.contains("changed"), "{err}");
+        }
+    }
+}

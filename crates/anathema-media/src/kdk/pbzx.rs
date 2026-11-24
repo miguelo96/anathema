@@ -8,12 +8,50 @@ use std::collections::BTreeMap;
 use std::io::{self, Read};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{channel, sync_channel, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
 const XZ_MAGIC: &[u8] = &[0xfd, b'7', b'z', b'X', b'Z', 0];
 
 type Decoded = (u64, std::result::Result<Vec<u8>, String>);
+
+/// Chunks read but not yet handed to the consumer are capped, so a slow consumer (a slow disk
+/// behind it) never makes the decoded data pile up in memory.
+struct Window {
+    state: Mutex<(usize, bool)>, // (in flight, closed)
+    room: Condvar,
+    cap: usize,
+}
+
+impl Window {
+    /// Waits for room for one more chunk; false once the consumer is gone.
+    fn take(&self) -> bool {
+        let Ok(mut st) = self.state.lock() else { return false };
+        while st.0 >= self.cap && !st.1 {
+            st = match self.room.wait(st) {
+                Ok(s) => s,
+                Err(_) => return false,
+            };
+        }
+        if st.1 {
+            return false;
+        }
+        st.0 += 1;
+        true
+    }
+    fn give(&self) {
+        if let Ok(mut st) = self.state.lock() {
+            st.0 = st.0.saturating_sub(1);
+        }
+        self.room.notify_one();
+    }
+    fn close(&self) {
+        if let Ok(mut st) = self.state.lock() {
+            st.1 = true;
+        }
+        self.room.notify_all();
+    }
+}
 
 pub struct Pbzx {
     results: Receiver<Decoded>,
@@ -23,6 +61,7 @@ pub struct Pbzx {
     pos: usize,
     consumed: Arc<AtomicU64>,
     done: bool,
+    window: Arc<Window>,
 }
 
 fn decode(usize_: u64, data: Vec<u8>) -> std::result::Result<Vec<u8>, String> {
@@ -41,9 +80,12 @@ fn decode(usize_: u64, data: Vec<u8>) -> std::result::Result<Vec<u8>, String> {
 }
 
 /// Reads chunks in order and queues them for the workers. Errors are reported in sequence.
-fn read_chunks<R: Read>(mut inner: R, jobs: std::sync::mpsc::SyncSender<(u64, u64, Vec<u8>)>, results: Sender<Decoded>, consumed: Arc<AtomicU64>) {
+fn read_chunks<R: Read>(mut inner: R, jobs: std::sync::mpsc::SyncSender<(u64, u64, Vec<u8>)>, results: Sender<Decoded>, consumed: Arc<AtomicU64>, window: Arc<Window>) {
     let mut seq = 0u64;
     loop {
+        if !window.take() {
+            return;
+        }
         let mut hdr = [0u8; 16];
         let mut got = 0;
         while got < 16 {
@@ -107,8 +149,10 @@ impl Pbzx {
             });
         }
         let c = consumed.clone();
-        thread::spawn(move || read_chunks(inner, job_tx, res_tx, c));
-        Ok(Pbzx { results: res_rx, pending: BTreeMap::new(), next: 0, buf: Vec::new(), pos: 0, consumed, done: false })
+        let window = Arc::new(Window { state: Mutex::new((0, false)), room: Condvar::new(), cap: threads * 2 });
+        let w = window.clone();
+        thread::spawn(move || read_chunks(inner, job_tx, res_tx, c, w));
+        Ok(Pbzx { results: res_rx, pending: BTreeMap::new(), next: 0, buf: Vec::new(), pos: 0, consumed, done: false, window })
     }
 
     /// Compressed bytes read from the input so far (for progress).
@@ -120,6 +164,7 @@ impl Pbzx {
         loop {
             if let Some(r) = self.pending.remove(&self.next) {
                 self.next += 1;
+                self.window.give();
                 return match r {
                     Ok(b) => {
                         self.buf = b;
@@ -146,6 +191,12 @@ impl Pbzx {
                 }
             }
         }
+    }
+}
+
+impl Drop for Pbzx {
+    fn drop(&mut self) {
+        self.window.close();
     }
 }
 

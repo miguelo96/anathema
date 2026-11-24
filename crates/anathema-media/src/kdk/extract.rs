@@ -57,7 +57,8 @@ pub fn extract(dmg: &Path, out: &Path, progress: &mut dyn FnMut(u64, u64)) -> Re
     let xar = Xar::open(pkg).with_context(|| format!("reading {PKG}"))?;
     let payload = xar.file(PAYLOAD)?;
     let total = payload.length;
-    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    // more than 8 xz workers buys little and costs 2 x 16 MiB of buffers each
+    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(8);
     let stream = Pbzx::new(xar.reader(&payload)?, threads)?;
     let consumed = stream.consumed();
     let mut report = ExtractReport::default();

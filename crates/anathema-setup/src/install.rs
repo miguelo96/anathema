@@ -182,7 +182,28 @@ pub fn update_boot(disk: &Disk, efi: &[u8], files: &[fat32::FileSpec], ctx: &mut
         kernel_files::update_plan(esp_free, &existing, &planned)?;
     }
 
-    (ctx.progress)(0.55, "Writing the Anathema boot image");
+    // kernel files first, loader last: a failure part way leaves the old loader in place
+    let ordered = kernel_files::update_order(files);
+    let extra: Vec<&fat32::FileSpec> = ordered.iter().filter(|f| f.path != "EFI/BOOT/BOOTX64.EFI").collect();
+    for (i, f) in extra.iter().enumerate() {
+        let target = esp_path(f.path);
+        (ctx.log)(format!("Writing {} ({} bytes)", target.display(), f.data.len()));
+        (ctx.progress)(0.55 + 0.25 * i as f32 / extra.len().max(1) as f32, "Writing the kernel files");
+        if ctx.dry_run {
+            continue;
+        }
+        if let Some(dir) = target.parent() {
+            fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+        }
+        let name = target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let staged = target.with_file_name(format!("{name}.new"));
+        fs::write(&staged, f.data).map_err(|e| format!("cannot write {}: {e}", staged.display()))?;
+        fs::rename(&staged, &target).map_err(|e| format!("cannot replace {}: {e}", target.display()))?;
+        if fs::read(&target).map_err(|e| e.to_string())? != f.data {
+            return Err(format!("verification failed: {} differs from what was written", target.display()));
+        }
+    }
+    (ctx.progress)(0.85, "Writing the Anathema boot image");
     let boot_dir = efi_dir.join("BOOT");
     let anathema_dir = efi_dir.join("anathema");
     let target = boot_dir.join("BOOTX64.EFI");
@@ -200,25 +221,6 @@ pub fn update_boot(disk: &Disk, efi: &[u8], files: &[fat32::FileSpec], ctx: &mut
             return Err("verification failed: BOOTX64.EFI differs from the image".into());
         }
         (ctx.log)("Verified BOOTX64.EFI".into());
-    }
-    let extra: Vec<&fat32::FileSpec> = files.iter().filter(|f| f.path != "EFI/BOOT/BOOTX64.EFI").collect();
-    for (i, f) in extra.iter().enumerate() {
-        let target = esp_path(f.path);
-        (ctx.log)(format!("Writing {} ({} bytes)", target.display(), f.data.len()));
-        (ctx.progress)(0.85 + 0.1 * i as f32 / extra.len().max(1) as f32, "Writing the kernel files");
-        if ctx.dry_run {
-            continue;
-        }
-        if let Some(dir) = target.parent() {
-            fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-        }
-        let name = target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let staged = target.with_file_name(format!("{name}.new"));
-        fs::write(&staged, f.data).map_err(|e| format!("cannot write {}: {e}", staged.display()))?;
-        fs::rename(&staged, &target).map_err(|e| format!("cannot replace {}: {e}", target.display()))?;
-        if fs::read(&target).map_err(|e| e.to_string())? != f.data {
-            return Err(format!("verification failed: {} differs from what was written", target.display()));
-        }
     }
     if !ctx.dry_run {
         disk::flush_letter(letter);

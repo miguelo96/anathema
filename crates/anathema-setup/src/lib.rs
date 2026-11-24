@@ -3,6 +3,7 @@
 
 pub mod fat32;
 pub mod kernel_files;
+pub mod stick;
 
 /// The commpage map stubs anathema-xboot installs (built by tools/mkxcp.sh from
 /// tools/commpage_stub.c; our own code, not Apple's).

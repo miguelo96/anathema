@@ -18,9 +18,10 @@ pub struct KernelFiles {
     pub xkc: Vec<u8>,
 }
 
-/// Peak disk use while preparing: both extracted kext trees (about 1.04 + 0.99 GB) plus one
-/// downloaded dmg (1.25 GB), with margin.
-pub const PEAK_CACHE_BYTES: u64 = 3_600_000_000;
+/// Written into an unpacked KDK folder: the sha256 of the dmg it came from.
+pub const PIN_FILE: &str = ".anathema-pin";
+/// About what one KDK's kexts and kernel take once unpacked (1.01 and 1.06 GB measured).
+const UNPACKED_BYTES: u64 = 1_100_000_000;
 /// Roughly what is downloaded, for the review page.
 pub const DOWNLOAD_BYTES: u64 = KDK_TAHOE.size + KDK_27.size;
 
@@ -68,16 +69,46 @@ pub fn kc_config(tahoe_ext: &Path, k27_ext: &Path, kernel: &Path) -> Config {
     }
 }
 
-/// Identifies everything that decides the output: the pins, the link options and this version.
-pub fn stamp() -> String {
+/// Everything that decides the output: the pins, the link options, the linker's source and this
+/// version.
+pub fn stamp_inputs() -> String {
     let mut text = String::new();
     for k in pin::ALL {
         text.push_str(&format!("{} {}\n", k.build, k.sha256));
     }
     text.push_str(&format!("kernel {KERNEL_SHA256}\n"));
     text.push_str(&format!("{:?}\n", kc_config(Path::new("tahoe"), Path::new("k27"), Path::new("kernel"))));
+    text.push_str(&format!("linker-source {}\n", env!("ANATHEMA_LINKER_SOURCE")));
     text.push_str(env!("CARGO_PKG_VERSION"));
-    sha256(text.as_bytes())
+    text
+}
+
+pub fn stamp() -> String {
+    sha256(stamp_inputs().as_bytes())
+}
+
+/// An unpacked KDK folder is reused only when it is complete and came from the pinned dmg.
+fn tree_done(tree: &Path, k: &Kdk) -> bool {
+    tree.join(MARKER).exists() && std::fs::read_to_string(tree.join(PIN_FILE)).is_ok_and(|s| s.trim() == k.sha256)
+}
+
+/// Free space still needed to finish: each missing KDK is downloaded (less what is already
+/// on disk), unpacked, and its dmg deleted before the next one, plus a margin for the outputs.
+pub fn space_needed(cache: &Path) -> u64 {
+    const MARGIN: i128 = 200_000_000;
+    let (mut used, mut peak) = (0i128, 0i128);
+    for k in [KDK_TAHOE, KDK_27] {
+        if tree_done(&cache.join(k.build), &k) {
+            continue;
+        }
+        let dmg = cache.join(format!("{}.dmg", k.build));
+        let part = cache.join(format!("{}.dmg.part", k.build));
+        let have = [dmg, part].iter().filter_map(|p| std::fs::metadata(p).ok()).map(|m| m.len()).max().unwrap_or(0).min(k.size);
+        used += (k.size - have) as i128 + UNPACKED_BYTES as i128;
+        peak = peak.max(used);
+        used -= k.size as i128;
+    }
+    (peak + MARGIN) as u64
 }
 
 pub fn space_check(free: u64, need: u64, cache: &Path) -> Result<(), String> {
@@ -138,14 +169,14 @@ pub fn prepare_with(
         return Ok(k);
     }
     let kdks = [KDK_TAHOE, KDK_27];
-    if kdks.iter().any(|k| !cache.join(k.build).join(MARKER).exists()) {
-        space_check(free_bytes, PEAK_CACHE_BYTES, cache)?;
+    if kdks.iter().any(|k| !tree_done(&cache.join(k.build), k)) {
+        space_check(free_bytes, space_needed(cache), cache)?;
     }
     std::fs::create_dir_all(cache).map_err(|e| format!("cannot create {}: {e}", cache.display()))?;
     for (i, k) in kdks.iter().enumerate() {
         let tree = cache.join(k.build);
         let (base, span) = (i as f32 * 0.4, 0.4f32);
-        if tree.join(MARKER).exists() {
+        if tree_done(&tree, k) {
             log(format!("Kernel Debug Kit {} already unpacked", k.build));
             continue;
         }
@@ -159,6 +190,7 @@ pub fn prepare_with(
         let stage = format!("Unpacking Kernel Debug Kit {}", k.build);
         let r = extract(&dmg, &tree, &mut |done, total| progress(base + span * (0.75 + 0.25 * done as f32 / total.max(1) as f32), &stage))
             .map_err(|e| format!("unpacking {}: {e:#}", k.build))?;
+        std::fs::write(tree.join(PIN_FILE), k.sha256).map_err(|e| format!("cannot write {}: {e}", tree.display()))?;
         log(format!("Unpacked {} files ({:.2} GB) from {}", r.files, r.bytes as f64 / 1e9, k.build));
         let _ = std::fs::remove_file(&dmg);
     }
@@ -207,6 +239,14 @@ pub fn esp_files<'a>(efi: &'a [u8], k: &'a KernelFiles) -> Vec<FileSpec<'a>> {
         FileSpec { path: "anathema/xkc.bin", data: &k.xkc },
         FileSpec { path: "anathema/xcp.bin", data: XCP },
     ]
+}
+
+/// The order update-boot writes in: the kernel files first and the loader last, so a failure
+/// part way leaves the old loader in place.
+pub fn update_order<'a>(files: &[FileSpec<'a>]) -> Vec<FileSpec<'a>> {
+    let mut v = files.to_vec();
+    v.sort_by_key(|f| f.path == "EFI/BOOT/BOOTX64.EFI");
+    v
 }
 
 /// Checks that updating an existing EFI partition fits, before anything is written. Each file
