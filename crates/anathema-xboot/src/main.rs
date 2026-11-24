@@ -36,12 +36,20 @@ const TSC_PATCHES: &[Patch] = &[Patch {
 // always applied: the stock macOS 27 x86_64 kernel runs its early memory reservations before
 // virtual_space_start/end are set (they stay 0), so the first reserved range is mapped at address 0.
 // the stub asks pmap_virtual_space() for the real range first, then continues into the original code.
+// used only when no corecrypto image (xkc.bin) is staged
+const NOKEXT_PATCHES: &[Patch] = &[Patch {
+    va: 0xffff_ff80_00b0_3afd,
+    expect: &[0x55, 0x48, 0x89, 0xe5],
+    replace: &[0xc3, 0x90, 0x90, 0x90],
+    why: "skip exe boothash salt check (no corecrypto image)",
+}];
+
 const EARLY_VM_PATCHES: &[Patch] = &[
     Patch {
-        va: 0xffff_ff80_00b0_3afd,
+        va: 0xffff_ff80_0082_6a90,
         expect: &[0x55, 0x48, 0x89, 0xe5],
         replace: &[0xc3, 0x90, 0x90, 0x90],
-        why: "skip exe boothash salt check (needs corecrypto kext, no boot kc yet)",
+        why: "skip trust_cache_runtime_init (needs the 27 amfi interface, absent with Tahoe's amfi)",
     },
     Patch {
         va: 0xffffff8000c42700,
@@ -204,8 +212,36 @@ fn device_tree() -> Vec<u8> {
     let chosen = node(&[("name", b"chosen\0"), ("random-seed", &seed)], &[memory_map]);
     let fsb = 100_000_000u64.to_le_bytes();
     let platform = node(&[("name", b"platform\0"), ("FSBFrequency", &fsb)], &[]);
-    let efi = node(&[("name", b"efi\0")], &[platform]);
-    node(&[("name", b"device-tree\0")], &[chosen, efi])
+    // one node per firmware configuration table, named by its GUID: the acpi driver finds its root
+    // table (and smbios) at /efi/configuration-table/<GUID> in the "table" property.
+    let mut cfg_nodes: Vec<Vec<u8>> = Vec::new();
+    if let Some(st) = uefi::table::system_table_raw() {
+        unsafe {
+            let src = st.as_ptr() as *const u8;
+            let n = core::ptr::read_unaligned(src.add(104) as *const u64) as usize;
+            let cfg = core::ptr::read_unaligned(src.add(112) as *const u64) as *const u8;
+            for i in 0..n.min(64) {
+                let e = cfg.add(i * 24);
+                let mut g = [0u8; 16];
+                core::ptr::copy_nonoverlapping(e, g.as_mut_ptr(), 16);
+                let addr = core::ptr::read_unaligned(e.add(16) as *const u64);
+                let d1 = u32::from_le_bytes([g[0], g[1], g[2], g[3]]);
+                let d2 = u16::from_le_bytes([g[4], g[5]]);
+                let d3 = u16::from_le_bytes([g[6], g[7]]);
+                let mut name = alloc::format!(
+                    "{:08X}-{:04X}-{:04X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}",
+                    d1, d2, d3, g[8], g[9], g[10], g[11], g[12], g[13], g[14], g[15]
+                )
+                .into_bytes();
+                name.push(0);
+                let tb = addr.to_le_bytes();
+                cfg_nodes.push(node(&[("name", &name), ("guid", &g), ("table", &tb)], &[]));
+            }
+        }
+    }
+    let cfg_table = node(&[("name", b"configuration-table\0")], &cfg_nodes);
+    let efi = node(&[("name", b"efi\0")], &[platform, cfg_table]);
+    node(&[("name", b"device-tree\0"), ("compatible", b"ACPI\0"), ("model", b"Anathema1,1\0")], &[chosen, efi])
 }
 
 // a minimal MH_FILESET kernel collection header: one segment covering the kernel and one entry, the kernel itself.
@@ -215,7 +251,7 @@ fn std_entry() -> bool {
     true
 }
 
-fn fake_kc() -> Vec<u8> {
+fn fake_kc(info_addr: u64, info_size: u64) -> Vec<u8> {
     let mut h: Vec<u8> = Vec::new();
     let w32 = |h: &mut Vec<u8>, v: u32| h.extend_from_slice(&v.to_le_bytes());
     let w64 = |h: &mut Vec<u8>, v: u64| h.extend_from_slice(&v.to_le_bytes());
@@ -247,8 +283,8 @@ fn fake_kc() -> Vec<u8> {
     let mut pn = [0u8; 16];
     pn[..14].copy_from_slice(b"__PRELINK_INFO");
     h.extend_from_slice(&pn);
-    w64(&mut h, KBASE + 0x20_0000 + 0x105_2000);
-    w64(&mut h, 0);
+    w64(&mut h, if info_size > 0 { info_addr } else { KBASE + 0x20_0000 + 0x105_2000 });
+    w64(&mut h, (info_size + 0xfff) & !0xfff);
     w64(&mut h, 0);
     w64(&mut h, 0);
     w32(&mut h, 3);
@@ -259,8 +295,8 @@ fn fake_kc() -> Vec<u8> {
     sn[..6].copy_from_slice(b"__info");
     h.extend_from_slice(&sn);
     h.extend_from_slice(&pn);
-    w64(&mut h, KBASE + 0x20_0000 + 0x105_2000);
-    w64(&mut h, 0);
+    w64(&mut h, if info_size > 0 { info_addr } else { KBASE + 0x20_0000 + 0x105_2000 });
+    w64(&mut h, info_size);
     w32(&mut h, 0);
     w32(&mut h, 0);
     w32(&mut h, 0);
@@ -280,6 +316,67 @@ fn fake_kc() -> Vec<u8> {
     id[..16].copy_from_slice(b"com.apple.kernel");
     h.extend_from_slice(&id);
     h
+}
+
+// a block of kexts linked offline by tools/kcbuild.py. layout of xkc.bin: eight u64 (magic, base va,
+// kext bytes, plist offset, plist length, corecrypto start va, corecrypto kmod_info va, blob length)
+// then the blob. the block is copied to its address and declared to the kernel through the empty
+// __PRELINK_TEXT segment of its own in-memory header (finalize marks such segments rwx).
+
+unsafe fn install_kc(blob: &[u8]) {
+    let base_va = rd64(blob, 8);
+    let total = rd64(blob, 16);
+    let blen = rd64(blob, 56) as usize;
+    let pa = base_va - KBASE;
+    core::ptr::copy(blob.as_ptr().add(64), pa as *mut u8, blen);
+    let hdr = 0x20_0000u64 as *mut u8;
+    let ncmds = *(hdr.add(16) as *const u32);
+    let mut o = 32usize;
+    for _ in 0..ncmds {
+        let cmd = *(hdr.add(o) as *const u32);
+        let sz = *(hdr.add(o + 4) as *const u32) as usize;
+        if cmd == 0x19 {
+            let nm = core::slice::from_raw_parts(hdr.add(o + 8), 15);
+            if nm == b"__PRELINK_TEXT\0" {
+                *(hdr.add(o + 24) as *mut u64) = base_va;
+                *(hdr.add(o + 32) as *mut u64) = ((blen as u64 + 0xfff) & !0xfff).max(total);
+            }
+        }
+        o += sz;
+    }
+    com1("anathema-xboot: kext block installed\n");
+}
+
+// the 27 intel kernel has no code that creates the commpage maps: vm_commpage_init and
+// vm_commpage_text_init only call the populate routines. xcp.bin holds two small replacements
+// (built from tools/commpage_stub.c) that create the four maps and then call those routines.
+// the first stub is at offset 0 and the second at 0x100.
+const CP_PA: u64 = 0xc4_2a00;
+const CP_INIT_PA: u64 = 0x39_c290;
+const CP_TEXT_INIT_PA: u64 = 0x39_c1f0;
+
+unsafe fn install_commpage(blob: &[u8]) {
+    let n = blob.len().min(0x400);
+    core::ptr::copy_nonoverlapping(blob.as_ptr(), CP_PA as *mut u8, n);
+    let sites = [(CP_INIT_PA, CP_PA), (CP_TEXT_INIT_PA, CP_PA + 0x100)];
+    for (site, target) in sites {
+        let hook = site as *mut u8;
+        let want = [0x55u8, 0x48, 0x89, 0xe5, 0x83];
+        let mut same = true;
+        for (i, b) in want.iter().enumerate() {
+            if *hook.add(i) != *b {
+                same = false;
+            }
+        }
+        if same {
+            let rel = (target as i64 - (site as i64 + 5)) as i32;
+            *hook = 0xe9;
+            core::ptr::copy_nonoverlapping(rel.to_le_bytes().as_ptr(), hook.add(1), 4);
+            com1("anathema-xboot: commpage map stub installed\n");
+        } else {
+            com1("anathema-xboot: commpage site bytes differ, not patched\n");
+        }
+    }
 }
 
 fn crc32(data: &[u8]) -> u32 {
@@ -411,6 +508,9 @@ fn main() -> Status {
         Err(_) => String::from(DEFAULT_ARGS),
     };
     let want_tsc_patch = fs.read(cstr16!("\\anathema\\xpatch-tsc")).is_ok();
+    let kext_blob: Vec<u8> = fs.read(cstr16!("\\anathema\\xkc.bin")).unwrap_or_default();
+    let have_kext = kext_blob.len() > 32 && rd64(&kext_blob, 0) == 0x434b_5841_4e41;
+    let cp_blob: Vec<u8> = fs.read(cstr16!("\\anathema\\xcp.bin")).unwrap_or_default();
     let kern = match parse(&kernel_file) {
         Ok(k) => k,
         Err(e) => return fail(e),
@@ -424,17 +524,30 @@ fn main() -> Status {
     let mmap_pa = align_up(dt_pa + dt.len() as u64, 0x1000);
     let mmap_cap = 0x10000u64;
     let kc_pa = mmap_pa + mmap_cap;
-    let kc = fake_kc();
+    let (kc_plist_va, kc_plist_len) = if have_kext {
+        (rd64(&kext_blob, 8) + rd64(&kext_blob, 24), rd64(&kext_blob, 32))
+    } else {
+        (0, 0)
+    };
+    let kc = fake_kc(kc_plist_va, kc_plist_len);
     let est_pa = kc_pa + 0x1000;
     let est = fake_system_table(est_pa);
     let final_end = kc_pa + 0x3000;
+    let ksize_end = if have_kext { final_end.max(rd64(&kext_blob, 8) - KBASE + rd64(&kext_blob, 56)) } else { final_end };
     let kaddr = 0x100000u64;
     println!("boot data: args {:#x}, tree {:#x} ({} bytes), map {:#x}, end {:#x}", boot_args_pa, dt_pa, dt.len(), mmap_pa, final_end);
 
     let src_lo = kernel_file.as_ptr() as u64;
     let src_hi = src_lo + kernel_file.len() as u64;
-    if src_lo < final_end && src_hi > kaddr {
+    if src_lo < ksize_end && src_hi > kaddr {
         return fail("the kernel file buffer overlaps the load area");
+    }
+    if have_kext {
+        let k_lo = kext_blob.as_ptr() as u64;
+        let k_hi = k_lo + kext_blob.len() as u64;
+        if k_lo < ksize_end && k_hi > kaddr {
+            return fail("the kext buffer overlaps the load area");
+        }
     }
 
     // identity map of the first 4 GB with 2 MB pages, plus a small GDT, both below 4 GB
@@ -443,7 +556,7 @@ fn main() -> Status {
         Err(_) => return fail("cannot allocate page tables"),
     };
     let tables = table_ptr as u64;
-    if tables < final_end {
+    if tables < ksize_end {
         return fail("page tables landed inside the load area");
     }
     unsafe {
@@ -480,7 +593,7 @@ fn main() -> Status {
     ba[1072..1076].copy_from_slice(&(dt_pa as u32).to_le_bytes());
     ba[1076..1080].copy_from_slice(&(dt.len() as u32).to_le_bytes());
     ba[1080..1084].copy_from_slice(&(kaddr as u32).to_le_bytes());
-    ba[1084..1088].copy_from_slice(&((final_end - kaddr) as u32).to_le_bytes());
+    ba[1084..1088].copy_from_slice(&((ksize_end - kaddr) as u32).to_le_bytes());
     ba[1152..1160].copy_from_slice(&100_000_000u64.to_le_bytes());
     ba[1256..1264].copy_from_slice(&(KBASE + kc_pa).to_le_bytes());
     ba[1104..1108].copy_from_slice(&((est_pa) as u32).to_le_bytes());
@@ -512,8 +625,18 @@ fn main() -> Status {
                 core::ptr::write_bytes(dst.add(take), 0, s.vmsize as usize - take);
             }
         }
+        if have_kext {
+            install_kc(&kext_blob);
+        }
+        if cp_blob.len() >= 0x100 {
+            install_commpage(&cp_blob);
+        }
         let empty: &[Patch] = &[];
-        let lists: [&[Patch]; 2] = [EARLY_VM_PATCHES, if want_tsc_patch { TSC_PATCHES } else { empty }];
+        let lists: [&[Patch]; 3] = [
+            EARLY_VM_PATCHES,
+            if want_tsc_patch { TSC_PATCHES } else { empty },
+            if have_kext { empty } else { NOKEXT_PATCHES },
+        ];
         {
             for pt in lists.iter().flat_map(|l| l.iter()) {
                 let dst = (pt.va - KBASE) as *mut u8;
