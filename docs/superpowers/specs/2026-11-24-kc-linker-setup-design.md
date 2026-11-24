@@ -41,17 +41,17 @@ Two jobs, from the collaborator's handoff:
 ## Constraints and facts found
 
 - **The kernel.** The loader targets exactly `xnu-13432.41.4~25/RELEASE_X86_64`, Darwin 27.2.0, LC_UUID `037E7B86-0AC8-3C67-AFB8-7C2C86435E9A`. The collaborator extracted it from the 27.2 IPSW.
-  - **Checked:** KDK 26B123's `System/Library/Kernels/kernel` is a thin x86_64 Mach-O with that LC_UUID. Every one of the 13 literal `expect` byte strings in xboot's patch tables matches it at its address.
+  - **Checked:** KDK 26B123's `System/Library/Kernels/kernel` is a thin x86_64 Mach-O with that LC_UUID, and its sha256 equals the collaborator's `x86k/kernel` (`3c93…fc83`); the collaborator reports that file is from build 26B131, whose KDK ships the same kernel. Every one of the 13 literal `expect` byte strings in xboot's patch tables matches it at its address.
   - Its sha256 is `3c9317518535791503970fbec322b9bba70e91f3a233536205ccd77b047ffc83` and it has 24,400 symbols.
   - Setup takes `xkernel` from this KDK and checks both its UUID and its sha256. No IPSW is needed.
   - The fat-slice path stays in the code for safety.
 - **The kexts** come from two KDKs, as in `tools/mkkc.sh`:
   - first `--ext`: Tahoe KDK **25G342** (26.7.3), the platform drivers
-  - second `--ext`: macOS 27 KDK **26B123** (27.2), used via `--prefer-last` for corecrypto, Compression, pthread, Libm, AppleEncryptedArchive, XrtHostedXnu, AppleImage4
+  - second `--ext`: macOS 27 KDK **26B131** (27.2.1), used via `--prefer-last` for corecrypto, Compression, pthread, Libm, AppleEncryptedArchive, XrtHostedXnu, AppleImage4
 - **Pinned downloads** (GitHub release asset digests, dortania/KdkSupportPkg):
-  - `26B123/Kernel_Debug_Kit_27.2_build_26B123.dmg`, 1,251,288,981 bytes, sha256 `c582c072188a15d8dbe0b878ab84563af8fb2baa25da2ea9565140de3df2228c`
+  - `26B131/Kernel_Debug_Kit_27.2.1_build_26B131.dmg`, 1,251,401,698 bytes, sha256 `287377a4c52ae3ad04476a35195fc143129a18a2d34cd585cbec7b35cfc42c81`
   - `25G342/Kernel_Debug_Kit_26.7.3_build_25G342.dmg`, 1,181,028,172 bytes, sha256 `219f27c7e039b6ab3426496e0d5852d55a31d00b3d3984d855cba04377c5dba0`
-- **dmg format** (checked on 26B123 via its trailer): UDIF, `koly` trailer, XML resource fork with `blkx` tables; chunk types LZFSE (`0x80000007`), zero fill (`0x2`), terminator (`0xffffffff`). The partition with the files is `Apple_HFSX` (case-sensitive HFS+). The reader must also accept raw (`0x1`), ignore (`0x2`), zlib (`0x80000005`) and bzip2/ADC as errors with a clear message, in case dortania repackages.
+- **dmg format** (checked on the 26B123 KDK via its trailer; dortania builds them all the same way): UDIF, `koly` trailer, XML resource fork with `blkx` tables; chunk types LZFSE (`0x80000007`), zero fill (`0x2`), terminator (`0xffffffff`). The partition with the files is `Apple_HFSX` (case-sensitive HFS+). The reader must also accept raw (`0x1`), ignore (`0x2`), zlib (`0x80000005`) and bzip2/ADC as errors with a clear message, in case dortania repackages.
 - **Inside the HFSX volume** there is a `.pkg` (xar archive). Its TOC is zlib-compressed XML; the KDK payload is a pbzx stream of xz chunks, which decodes to an odc cpio archive (`070707` headers).
 - `anathema-media` already has: `lzfse_rust`, sha256 (`sha2`), an order-preserving XML plist parser (`plist::Value::Dict` is a `Vec`), a resumable HTTP downloader with ETag/If-Range (`download.rs`, sha1 only, prints to stderr), and `ReadAt` random access over files and HTTP.
 - `anathema-setup` is Windows-only (uses `std::os::windows`, `windows-sys`). It embeds the loader via `ANATHEMA_EFI` in `build.rs`. Its FAT32 writer (`fat32.rs`) builds a fixed tree with one file (`EFI/BOOT/BOOTX64.EFI`, 512-byte clusters, 200 MiB ESP). The update-boot mode writes through the ESP's drive letter.
@@ -87,7 +87,7 @@ A faithful port of `kcbuild.py`.
 **Deliberate difference: walk order.** Python uses `os.walk`, whose order depends on the filesystem (hash order on ext4). Rust walks in sorted byte order of names. This only affects (a) which bundle wins when two bundles share an id within the `--ext` set and (b) the plist position of codeless pseudo-kexts (`OSKernelResource`). Link order and every address come from the root closure, which does not depend on walk order. Parity tests run the Python with a sorted walk.
 
 **Checked:**
-- 25G342 has 904 kexts and 26B123 has 871.
+- 25G342 has 904 kexts and 26B123 has 871 (counted before the pin moved to 26B131; recheck on 26B131).
 - All of their Info.plists are XML.
 - No bundle id appears twice within a KDK.
 - No `.kext` lies outside `System/Library/Extensions`.
@@ -152,7 +152,7 @@ What this does not cover: running setup itself on Windows against a real USB sti
 ## Decided by the owner
 
 - Approach 1, pure Rust, in-process.
-- KDK pins: 25G342 for the platform drivers, a 27.x KDK for corecrypto and the others (26B123 chosen, matching the kernel's xnu build).
+- KDK pins: 25G342 for the platform drivers, a 27.x KDK for corecrypto and the others (26B131, the collaborator's kdk2, confirmed after review; was 26B123).
 - The kernel must be xnu-13432.41.4~25 RELEASE_X86_64, UUID above.
 - The stick boots xboot only. The arm path leaves the shipped setup.
 - The kmod size bug is fixed in both the Rust port and `kcbuild.py`.
@@ -168,6 +168,7 @@ What this does not cover: running setup itself on Windows against a real USB sti
 ## Open items for the collaborator
 
 - **xcp.bin build recipe.** The repo has the C source but not the compile and link command that puts `.text.a` at offset 0 and `.text.b` at 0x100. Until they send their binary or command, the builder makes one with clang and documents the command. The QEMU boot test shows whether the commpage stubs run.
-- **The 27.x KDK for kdk2.** 26B123 is assumed. If they used 26B118 or 26B131, swap the pin.
+- ~~The 27.x KDK for kdk2~~: answered, 26B131.
+- **Root list.** Setup links mkkc.sh's nine fixed roots followed by `tools/kc-roots.txt`, as `mkkc.sh $(cat tools/kc-roots.txt)` would. Confirm that is what boots.
 - **Is their kernel the same file?** Compare the sha256 of `~/anathema-work/x86k/kernel` with the KDK kernel's (`3c93…fc83`). If the two differ (same UUID, different symbol table), kext imports may resolve differently from the build that booted.
 - **Their known-good outputs.** The sha256 of their `xkc.bin` or their `xkc.bin.map`, and the `kdk_cpio_extract.py` patterns they used for `~/kdk2` and `~/kdk3`. Until these arrive, the parity test (Python vs Rust on the same trees) plus the QEMU boot are the checks.

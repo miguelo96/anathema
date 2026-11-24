@@ -15,16 +15,16 @@
 - No Apple file (kernel, kext, plist, dmg, pkg) is committed or embedded. Tests build their fixtures at run time; tests that need real KDKs read paths from env vars and skip when unset.
 - Pins, verbatim:
   - `https://github.com/dortania/KdkSupportPkg/releases/download/25G342/Kernel_Debug_Kit_26.7.3_build_25G342.dmg`, size 1181028172, sha256 `219f27c7e039b6ab3426496e0d5852d55a31d00b3d3984d855cba04377c5dba0`
-  - `https://github.com/dortania/KdkSupportPkg/releases/download/26B123/Kernel_Debug_Kit_27.2_build_26B123.dmg`, size 1251288981, sha256 `c582c072188a15d8dbe0b878ab84563af8fb2baa25da2ea9565140de3df2228c`
-  - Kernel: `System/Library/Kernels/kernel` from 26B123, LC_UUID `037E7B86-0AC8-3C67-AFB8-7C2C86435E9A`, sha256 `3c9317518535791503970fbec322b9bba70e91f3a233536205ccd77b047ffc83`, size 21128776.
+  - `https://github.com/dortania/KdkSupportPkg/releases/download/26B131/Kernel_Debug_Kit_27.2.1_build_26B131.dmg`, size 1251401698, sha256 `287377a4c52ae3ad04476a35195fc143129a18a2d34cd585cbec7b35cfc42c81`
+  - Kernel: `System/Library/Kernels/kernel` from 26B131, LC_UUID `037E7B86-0AC8-3C67-AFB8-7C2C86435E9A`, sha256 `3c9317518535791503970fbec322b9bba70e91f3a233536205ccd77b047ffc83`, size 21128776.
 - Linker constants from `kcbuild.py`: page `0x4000`, `PLIST_RESERVE = 0x80000`, magic `0x434b58414e41`, `MH_DYLIB_IN_CACHE = 0x80000000`, x86_64 cputype `0x01000007`, spare tail `0x2000`.
 - The setup link uses the `tools/mkkc.sh` options exactly:
-  - `--ext` 25G342 tree first, then the 26B123 tree
+  - `--ext` 25G342 tree first, then the 26B131 tree
   - `--prefer-last` for `com.apple.kec.corecrypto`, `com.apple.kec.Compression`, `com.apple.kec.pthread`, `com.apple.kec.Libm`, `com.apple.kec.AppleEncryptedArchive`, `com.apple.kec.XrtHostedXnu`, `com.apple.security.AppleImage4`
   - `--strip com.apple.security.AppleImage4:AppleSecurityExtension` and `--strip com.apple.kext.CoreTrust:AppleSecurityExtension`
   - `--codeless com.apple.driver.AppleMobileFileIntegrity`
   - `--base 0xffffff8002000000`
-  - roots, in order: `com.apple.driver.AppleACPIPlatform com.apple.kec.corecrypto com.apple.kec.AppleEncryptedArchive com.apple.kec.XrtHostedXnu com.apple.kec.Libm com.apple.kec.Compression com.apple.kec.pthread com.apple.security.AppleImage4 com.apple.kext.CoreTrust`
+  - roots, in order: `com.apple.driver.AppleACPIPlatform com.apple.kec.corecrypto com.apple.kec.AppleEncryptedArchive com.apple.kec.XrtHostedXnu com.apple.kec.Libm com.apple.kec.Compression com.apple.kec.pthread com.apple.security.AppleImage4 com.apple.kext.CoreTrust`, then every line of `tools/kc-roots.txt` in file order (as `mkkc.sh $(cat tools/kc-roots.txt)`; see ledger ruling)
 - ESP file paths: `EFI/BOOT/BOOTX64.EFI`, `anathema/xkernel`, `anathema/xkc.bin`, `anathema/xcp.bin`. Update-boot keeps also writing `EFI/anathema/anathema.efi`.
 - Pure-Rust dependencies only (the Windows exe is cross-built; no C toolchain).
 - Error types: `anyhow::Result` in `anathema-media` and `anathema-kc`; `Result<_, String>` in `anathema-setup`, as today.
@@ -225,13 +225,13 @@ Port notes (behavior the signature does not show; copy from `kcbuild.py`):
 **Interfaces:**
 - Produces:
   - `kdk::pin::Kdk { pub build: &'static str, pub url: &'static str, pub size: u64, pub sha256: &'static str }`
-  - `pub const KDK_TAHOE: Kdk` (25G342) and `pub const KDK_27: Kdk` (26B123), with values from Global Constraints
+  - `pub const KDK_TAHOE: Kdk` (25G342) and `pub const KDK_27: Kdk` (26B131), with values from Global Constraints
   - `pub const KERNEL_UUID: [u8; 16]`, `pub const KERNEL_SHA256: &str`, `pub const KERNEL_PATH: &str = "System/Library/Kernels/kernel"`
   - `download::download_verified(url: &str, target: &Path, size: u64, sha256: &str, progress: &mut dyn FnMut(u64, u64)) -> Result<()>`. It resumes `<target>.part` like `download`, hashes with sha256, and leaves the result only at `target`.
   - `download::verify_or_discard(path: &Path, sha256: &str) -> Result<bool>`. It deletes the file on a mismatch and returns `false`.
   - `kdk::extract::wanted(name: &str) -> bool`: true for `KERNEL_PATH`, or for a name under `System/Library/Extensions/` where some component ends with `.kext` and none ends with `.dSYM`.
   - `kdk::extract::extract(dmg: &Path, out: &Path, progress: &mut dyn FnMut(u64, u64)) -> Result<ExtractReport>`, where `ExtractReport { pub files: u64, pub bytes: u64, pub longest_path: usize }`. It runs UDIF, HFS, `KernelDebugKit.pkg`, xar `KDK.pkg/Payload`, pbzx and cpio, writing only the files `wanted` accepts. Writes are atomic per file (`.tmp` then rename). It writes `out/.anathema-extracted` holding the dmg's sha256 last.
-  - CLI: `anathema-media kdk fetch <25G342|26B123> [--out DIR]` and `anathema-media kdk extract <dmg> <outdir>`.
+  - CLI: `anathema-media kdk fetch <25G342|26B131> [--out DIR]` and `anathema-media kdk extract <dmg> <outdir>`.
 
 - [ ] **Step 1: Write failing tests:**
   - `verify_or_discard_rejects_corrupt_file` (temp file, wrong hash: returns `false` and the file is gone).
@@ -246,7 +246,7 @@ Port notes (behavior the signature does not show; copy from `kcbuild.py`):
   - `real_kdk_extract_matches_python` (`#[ignore]` unless `KDK_DMG` and `KDK_REF` are set). It extracts `$KDK_DMG`. Every extracted file must exist in `$KDK_REF` with equal bytes, and every `wanted` file in `$KDK_REF` must have been extracted.
 - [ ] **Step 2:** `cargo test -p anathema-media --test kdk_streams`. Expected: FAIL.
 - [ ] **Step 3:** Implement. Refactor `download()` to share its resume loop with `download_verified` (CLI output for `download()` unchanged).
-- [ ] **Step 4:** Run the unit tests (expected: PASS). Then run `KDK_DMG=$S/kdk-dl/Kernel_Debug_Kit_27.2_build_26B123.dmg KDK_REF=$S/ref27/kdk_files cargo test -p anathema-media --release --test kdk_streams -- --ignored`, and the same for 25G342 with `ref26`. Expected: PASS. Print the extract time and `longest_path` in the test output.
+- [ ] **Step 4:** Run the unit tests (expected: PASS). Then run `KDK_DMG=$S/kdk-dl/Kernel_Debug_Kit_27.2.1_build_26B131.dmg KDK_REF=$S/ref27/kdk_files cargo test -p anathema-media --release --test kdk_streams -- --ignored`, and the same for 25G342 with `ref26`. Expected: PASS. Print the extract time and `longest_path` in the test output.
 - [ ] **Step 5:** Commit: `media: pinned kdk download and pure rust kdk extraction`.
 
 ### Task 8: Setup lib, FAT32 file tree, xcp.bin, ESP dev tool
