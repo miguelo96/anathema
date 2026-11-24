@@ -433,3 +433,10 @@ fn section_and_cursor_stay_inside_their_window() {
     c.read_to_end(&mut all).unwrap();
     assert_eq!(all, [98, 99]);
 }
+
+#[test]
+fn media_plist_parses_hex_integer() {
+    let v = plist::parse("<plist><dict><key>A</key><integer>0xffffff8002000000</integer><key>B</key><integer>0X10</integer></dict></plist>").unwrap();
+    assert_eq!(v.get("A").and_then(plist::Value::as_int), Some(0xffff_ff80_0200_0000u64 as i64));
+    assert_eq!(v.get("B").and_then(plist::Value::as_int), Some(16));
+}
