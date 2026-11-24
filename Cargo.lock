@@ -131,6 +131,8 @@ dependencies = [
 name = "anathema-setup"
 version = "0.1.0"
 dependencies = [
+ "anathema-kc",
+ "anathema-media",
  "eframe",
  "windows-sys 0.61.2",
 ]
