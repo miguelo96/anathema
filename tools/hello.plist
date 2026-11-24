@@ -6,8 +6,13 @@
 	<string>com.anathema.hello</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>/usr/local/bin/anathema-hello</string>
+		<string>/bin/sh</string>
+		<string>/usr/local/bin/boot.sh</string>
 	</array>
+	<key>StandardOutPath</key>
+	<string>/dev/console</string>
+	<key>StandardErrorPath</key>
+	<string>/dev/console</string>
 	<key>RunAtLoad</key>
 	<true/>
 	<key>KeepAlive</key>
