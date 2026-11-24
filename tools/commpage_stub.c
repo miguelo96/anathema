@@ -12,6 +12,9 @@ typedef void (*v_t)(void);
 #define TEXT32 0xffffff80010f4ec8ul
 #define TEXT64 0xffffff80010f4ed0ul
 #define AREA 0x200000ul
+#define RANDOM 0xffffff800045cdb0ul
+#define LOC32 0xffffff800110d1e8ul
+#define LOC64 0xffffff800110d1e0ul
 
 static void *mk(void)
 {
@@ -32,6 +35,9 @@ __attribute__((section(".text.a"))) void anx_commpage_init(void)
 
 __attribute__((section(".text.b"), aligned(256))) void anx_commpage_text_init(void)
 {
+	unsigned (*rnd)(void) = (unsigned (*)(void))RANDOM;
+	*(unsigned *)LOC32 = 0xffff1000u + (rnd() % 14u) * 4096u;
+	*(u64 *)LOC64 = 0x7fffffe01000ul + (u64)(rnd() % 510u) * 4096ul;
 	*(void **)TEXT32 = mk();
 	*(void **)TEXT64 = mk();
 	((v_t)COMMPAGE_TEXT_POPULATE)();

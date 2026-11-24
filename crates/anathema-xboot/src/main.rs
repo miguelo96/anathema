@@ -420,6 +420,8 @@ unsafe fn install_amfi_standin(va: u64) {
     core::ptr::copy_nonoverlapping(va.to_le_bytes().as_ptr(), AMFI_GLOBAL_PA as *mut u8, 8);
 }
 
+static mut CP_STORE_VA: u64 = 0;
+
 unsafe fn install_kc(blob: &[u8]) {
     let base_va = rd64(blob, 8);
     let total = rd64(blob, 16);
@@ -442,6 +444,7 @@ unsafe fn install_kc(blob: &[u8]) {
         o += sz;
     }
     install_runtime_stub(base_va + blen as u64 - 0x2000);
+    CP_STORE_VA = base_va + blen as u64 - 0x2000 + 0x800;
     install_amfi_standin(base_va + blen as u64 - 0x1000);
     com1("anathema-xboot: kext block installed\n");
 }
@@ -453,6 +456,58 @@ unsafe fn install_kc(blob: &[u8]) {
 const CP_PA: u64 = 0xc4_2a00;
 const CP_INIT_PA: u64 = 0x39_c290;
 const CP_TEXT_INIT_PA: u64 = 0x39_c1f0;
+
+const CP2_PA: u64 = 0xc4_2c40;
+const VM_MAP_EXEC_PA: u64 = 0x35_0e80;
+
+// maps the commpage into every exec'd user task: the 27 intel kernel has no code that does it
+unsafe fn install_commpage_enter(blob: &[u8]) {
+    if CP_STORE_VA == 0 || blob.len() < 0x40 || blob.len() > 0x3c0 {
+        com1("anathema-xboot: commpage enter stub not installed\n");
+        return;
+    }
+    let mut buf = [0u8; 0x3c0];
+    let n = blob.len();
+    buf[..n].copy_from_slice(blob);
+    let code = &mut buf[..n];
+    let ph = 0x1122_3344_5566_7788u64.to_le_bytes();
+    let mut i = 0;
+    while i + 8 <= code.len() {
+        if code[i..i + 8] == ph {
+            code[i..i + 8].copy_from_slice(&CP_STORE_VA.to_le_bytes());
+            i += 8;
+        } else {
+            i += 1;
+        }
+    }
+    let site = VM_MAP_EXEC_PA as *mut u8;
+    let want = [0x55u8, 0x48, 0x89, 0xe5, 0x41, 0x57];
+    for (k, b) in want.iter().enumerate() {
+        if *site.add(k) != *b {
+            com1("anathema-xboot: vm_map_exec bytes differ, commpage enter not installed\n");
+            return;
+        }
+    }
+    core::ptr::copy_nonoverlapping(code.as_ptr(), CP2_PA as *mut u8, code.len());
+    let rel = (CP2_PA as i64 - (VM_MAP_EXEC_PA as i64 + 5)) as i32;
+    *site = 0xe9;
+    core::ptr::copy_nonoverlapping(rel.to_le_bytes().as_ptr(), site.add(1), 4);
+    *site.add(5) = 0x90;
+    com1("anathema-xboot: commpage enter hook installed\n");
+    let site2 = 0x34_33a0u64 as *mut u8;
+    let want2 = [0x55u8, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x53, 0x48, 0x83, 0xec, 0x38, 0x4c, 0x8b, 0x57, 0x18];
+    for (k, b) in want2.iter().enumerate() {
+        if *site2.add(k) != *b {
+            com1("anathema-xboot: fixed locator bytes differ, hook not installed\n");
+            return;
+        }
+    }
+    let rel2 = ((CP2_PA + 0x40) as i64 - (0x34_33a0i64 + 5)) as i32;
+    *site2 = 0xe9;
+    core::ptr::copy_nonoverlapping(rel2.to_le_bytes().as_ptr(), site2.add(1), 4);
+    *site2.add(5) = 0x90;
+    com1("anathema-xboot: commpage fixed locator hook installed\n");
+}
 
 unsafe fn install_commpage(blob: &[u8]) {
     let n = blob.len().min(0x400);
@@ -678,6 +733,7 @@ fn main() -> Status {
     let kext_blob: Vec<u8> = fs.read(cstr16!("\\anathema\\xkc.bin")).unwrap_or_default();
     let have_kext = kext_blob.len() > 32 && rd64(&kext_blob, 0) == 0x434b_5841_4e41;
     let cp_blob: Vec<u8> = fs.read(cstr16!("\\anathema\\xcp.bin")).unwrap_or_default();
+    let cp2_blob: Vec<u8> = fs.read(cstr16!("\\anathema\\xcp2.bin")).unwrap_or_default();
     let kern = match parse(&kernel_file) {
         Ok(k) => k,
         Err(e) => return fail(e),
@@ -818,6 +874,9 @@ fn main() -> Status {
         *((0x10_526c0u64) as *mut u8) = 1;
         if cp_blob.len() >= 0x100 {
             install_commpage(&cp_blob);
+        }
+        if !cp2_blob.is_empty() {
+            install_commpage_enter(&cp2_blob);
         }
         let empty: &[Patch] = &[];
         let lists: [&[Patch]; 4] = [

@@ -12,6 +12,7 @@ mmd -i xesp.img ::/EFI ::/EFI/BOOT ::/anathema
 mcopy -i xesp.img "$EFI" ::/EFI/BOOT/BOOTX64.EFI
 mcopy -i xesp.img ~/anathema-work/x86k/kernel ::/anathema/xkernel
 [ -f ~/anathema-work/xcp.bin ] && mcopy -i xesp.img ~/anathema-work/xcp.bin ::/anathema/xcp.bin
+[ -f ~/anathema-work/xcp2.bin ] && mcopy -i xesp.img ~/anathema-work/xcp2.bin ::/anathema/xcp2.bin
 [ -f ~/anathema-work/xkc.bin ] && [ -z "$NOKEXT" ] && mcopy -i xesp.img ~/anathema-work/xkc.bin ::/anathema/xkc.bin
 if [ -n "$XARGS" ]; then printf '%s' "$XARGS" > /tmp/xargs.txt; mcopy -i xesp.img /tmp/xargs.txt ::/anathema/xargs.txt; fi
 if [ -n "$XTSC" ]; then : > /tmp/xpatch-tsc; mcopy -i xesp.img /tmp/xpatch-tsc ::/anathema/xpatch-tsc; fi
