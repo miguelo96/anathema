@@ -259,6 +259,7 @@ def main():
         if not e["exe"]:
             continue
         m, img, load = e["m"], e["img"], e["load"]
+        size = e["size"]
         search = [e["bid"]] + deps_closure(e["bid"])
         dy = m.dy
         cache = {}
