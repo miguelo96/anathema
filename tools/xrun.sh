@@ -15,6 +15,7 @@ mcopy -i xesp.img ~/anathema-work/x86k/kernel ::/anathema/xkernel
 [ -f ~/anathema-work/xkc.bin ] && [ -z "$NOKEXT" ] && mcopy -i xesp.img ~/anathema-work/xkc.bin ::/anathema/xkc.bin
 if [ -n "$XARGS" ]; then printf '%s' "$XARGS" > /tmp/xargs.txt; mcopy -i xesp.img /tmp/xargs.txt ::/anathema/xargs.txt; fi
 if [ -n "$XTSC" ]; then : > /tmp/xpatch-tsc; mcopy -i xesp.img /tmp/xpatch-tsc ::/anathema/xpatch-tsc; fi
+if [ -n "$XAMD" ]; then : > /tmp/xpatch-amd; mcopy -i xesp.img /tmp/xpatch-amd ::/anathema/xpatch-amd; fi
 cp /usr/share/OVMF/OVMF_VARS_4M.fd /tmp/xvars.fd
 rm -f /tmp/qmon.sock /tmp/xserial.log
 qemu-system-x86_64 -machine ${QMACH:-q35} -cpu ${QCPU:-Haswell} -m 2G -smp 1 -accel tcg -display none -no-reboot \

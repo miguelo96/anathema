@@ -23,15 +23,26 @@ struct Patch {
     why: &'static str,
 }
 
-// applied only when \\anathema\\xpatch-tsc exists: qemu's software cpu reads MSR_PLATFORM_INFO as zero,
-// which makes tsc_init divide by a zero bus ratio. use ratio 24 (2.4 GHz tsc on a 100 MHz bus).
-const TSC_PATCHES: &[Patch] = &[Patch {
-    va: 0xffff_ff80_0040_198d,
-    expect: &[0x48, 0x8b, 0x0d, 0xdc, 0x65, 0xbf, 0x00],
-    replace: &[0xb9, 0x18, 0x00, 0x00, 0x00, 0x90, 0x90],
-    why: "tsc_init bus ratio",
-}];
 
+
+
+// applied only when \\anathema\\xpatch-amd exists: the kernel's cpu identification refuses anything
+// that is not an intel cpu ("Unsupported CPU" in cpuid_set_info).
+const AMD_PATCHES: &[Patch] = &[
+    Patch {
+        va: 0xffff_ff80_003e_589b,
+        expect: &[0x0f, 0x85, 0x04, 0x03, 0x00, 0x00],
+        replace: &[0x90, 0x90, 0x90, 0x90, 0x90, 0x90],
+        why: "cpuid_set_info vendor check",
+    },
+    // the cache line size comes from intel's cpuid leaf 4, which amd cpus don't have: use 64
+    Patch {
+        va: 0xffff_ff80_003e_6567,
+        expect: &[0x8b, 0x5d, 0xbc, 0x85, 0xdb, 0x75, 0x0b, 0x8b, 0x5d, 0xb8, 0x85, 0xdb],
+        replace: &[0xbb, 0x40, 0x00, 0x00, 0x00, 0xeb, 0x0b, 0x90, 0x90, 0x90, 0x90, 0x90],
+        why: "cpuid cache line size fallback",
+    },
+];
 
 // always applied: the stock macOS 27 x86_64 kernel runs its early memory reservations before
 // virtual_space_start/end are set (they stay 0), so the first reserved range is mapped at address 0.
@@ -461,6 +472,52 @@ unsafe fn install_commpage(blob: &[u8]) {
     }
 }
 
+// amd cpus: after the vendor check is skipped the kernel still wants family 6 and a known intel model
+// to pick a cpu family. overwrite its decoded family and model with a haswell (family 6, model 0x3c)
+// right where it compares them, from a small cave in the kernel text.
+const AMD_CAVE_PA: u64 = 0xc4_2c00;
+const CPUID_FAMILY_PA: u64 = 0x10b_e14c;
+const CPUID_MODEL_PA: u64 = 0x10b_e14d;
+const CPUID_STEPPING_PA: u64 = 0x10b_e150;
+const AMD_SITE_PA: u64 = 0x3e_58a5;
+const AMD_BACK_PA: u64 = 0x3e_58ae;
+
+unsafe fn install_amd_cpuid_spoof() {
+    let site = AMD_SITE_PA as *mut u8;
+    let want = [0x80u8, 0x3d];
+    if *site != want[0] || *site.add(1) != want[1] || *site.add(6) != 0x06 {
+        com1("anathema-xboot: amd cpuid site bytes differ, not patched\n");
+        return;
+    }
+    let cave = AMD_CAVE_PA as *mut u8;
+    let r1 = (CPUID_FAMILY_PA as i64 - (AMD_CAVE_PA as i64 + 7)) as i32;
+    let r2 = (CPUID_MODEL_PA as i64 - (AMD_CAVE_PA as i64 + 14)) as i32;
+    let r3 = (CPUID_STEPPING_PA as i64 - (AMD_CAVE_PA as i64 + 21)) as i32;
+    let r4 = (AMD_BACK_PA as i64 - (AMD_CAVE_PA as i64 + 26)) as i32;
+    let mut code = [0u8; 26];
+    code[0] = 0xc6;
+    code[1] = 0x05;
+    code[2..6].copy_from_slice(&r1.to_le_bytes());
+    code[6] = 0x06;
+    code[7] = 0xc6;
+    code[8] = 0x05;
+    code[9..13].copy_from_slice(&r2.to_le_bytes());
+    code[13] = 0x3c;
+    code[14] = 0xc6;
+    code[15] = 0x05;
+    code[16..20].copy_from_slice(&r3.to_le_bytes());
+    code[20] = 0x03;
+    code[21] = 0xe9;
+    code[22..26].copy_from_slice(&r4.to_le_bytes());
+    core::ptr::copy_nonoverlapping(code.as_ptr(), cave, code.len());
+    let to_cave = (AMD_CAVE_PA as i64 - (AMD_SITE_PA as i64 + 5)) as i32;
+    *site = 0xe9;
+    core::ptr::copy_nonoverlapping(to_cave.to_le_bytes().as_ptr(), site.add(1), 4);
+    *site.add(5) = 0x90;
+    *site.add(6) = 0x90;
+    com1("anathema-xboot: amd cpuid spoofed to haswell\n");
+}
+
 fn crc32(data: &[u8]) -> u32 {
     let mut c = 0xffff_ffffu32;
     for &b in data {
@@ -590,6 +647,28 @@ fn main() -> Status {
         Err(_) => String::from(DEFAULT_ARGS),
     };
     let want_tsc_patch = fs.read(cstr16!("\\anathema\\xpatch-tsc")).is_ok();
+    // "AuthenticAMD": the intel kernel needs its cpu identification patched on amd processors
+    let is_amd = {
+        let r = core::arch::x86_64::__cpuid(0);
+        r.ebx == 0x6874_7541 && r.edx == 0x6974_6e65 && r.ecx == 0x444d_4163
+    };
+    let want_amd_patch = is_amd || fs.read(cstr16!("\\anathema\\xpatch-amd")).is_ok();
+    if is_amd {
+        println!("amd cpu detected: applying the amd patches");
+    }
+    // tsc speed in units of the 100 MHz bus, measured against the firmware timer: the kernel's tsc_init
+    // reads it from MSR_PLATFORM_INFO, which qemu leaves at zero and amd cpus don't have
+    let tsc_ratio: u32 = if want_tsc_patch || want_amd_patch {
+        let t0 = unsafe { core::arch::x86_64::_rdtsc() };
+        boot::stall(100_000);
+        let t1 = unsafe { core::arch::x86_64::_rdtsc() };
+        let hz = (t1 - t0) * 10;
+        let r = ((hz + 50_000_000) / 100_000_000) as u32;
+        println!("tsc: about {} MHz, ratio {}", hz / 1_000_000, r);
+        r.clamp(8, 80)
+    } else {
+        0
+    };
     let kext_blob: Vec<u8> = fs.read(cstr16!("\\anathema\\xkc.bin")).unwrap_or_default();
     let have_kext = kext_blob.len() > 32 && rd64(&kext_blob, 0) == 0x434b_5841_4e41;
     let cp_blob: Vec<u8> = fs.read(cstr16!("\\anathema\\xcp.bin")).unwrap_or_default();
@@ -711,6 +790,22 @@ fn main() -> Status {
         if have_kext {
             install_kc(&kext_blob);
         }
+        if want_amd_patch {
+            install_amd_cpuid_spoof();
+        }
+        if tsc_ratio != 0 {
+            let site = 0x40_198du64 as *mut u8;
+            let want = [0x48u8, 0x8b, 0x0d];
+            if *site == want[0] && *site.add(1) == want[1] && *site.add(2) == want[2] {
+                *site = 0xb9;
+                core::ptr::copy_nonoverlapping(tsc_ratio.to_le_bytes().as_ptr(), site.add(1), 4);
+                *site.add(5) = 0x90;
+                *site.add(6) = 0x90;
+                com1("anathema-xboot: tsc ratio patched\n");
+            } else {
+                com1("anathema-xboot: tsc ratio site differs, not patched\n");
+            }
+        }
         // gIOPlatformUUIDAndSerialDone: on intel the platform uuid is only published once the nvram
         // driver registers, and the security-extension step waits forever for it. until nvram has
         // runtime services behind it, mark it done so the kernel moves on.
@@ -719,10 +814,11 @@ fn main() -> Status {
             install_commpage(&cp_blob);
         }
         let empty: &[Patch] = &[];
-        let lists: [&[Patch]; 3] = [
+        let lists: [&[Patch]; 4] = [
             EARLY_VM_PATCHES,
-            if want_tsc_patch { TSC_PATCHES } else { empty },
+            empty,
             if have_kext { empty } else { NOKEXT_PATCHES },
+            if want_amd_patch { AMD_PATCHES } else { empty },
         ];
         {
             for pt in lists.iter().flat_map(|l| l.iter()) {
