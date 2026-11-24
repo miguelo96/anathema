@@ -79,6 +79,10 @@ impl<'a> Fat<'a> {
     }
 }
 
+fn xkc_len(files: &[FileSpec]) -> usize {
+    files[2].data.len()
+}
+
 fn pattern(n: usize, seed: u8) -> Vec<u8> {
     (0..n).map(|i| (i as u8).wrapping_mul(31).wrapping_add(seed)).collect()
 }
@@ -113,6 +117,11 @@ fn tree_with_four_files_round_trips() {
     assert_eq!(xkernel[12], 0x08);
     let xkc = raw.chunks(32).find(|e| &e[..11] == b"XKC     BIN").unwrap();
     assert_eq!(xkc[12], 0x18);
+    // FSInfo: free cluster count and next free cluster are filled in
+    let used: u64 = [efi.len(), kernel.len(), xkc_len(&files), xcp.len()].iter().map(|n| (*n as u64).div_ceil(512)).sum::<u64>() + 4;
+    let total_clusters = (img.len() as u64 / 512) - (fat.data as u64 / 512);
+    assert_eq!(le32(&img, 512 + 488), total_clusters - used);
+    assert_eq!(le32(&img, 512 + 492), 2 + used);
 
     #[cfg(target_os = "macos")]
     {
@@ -120,7 +129,9 @@ fn tree_with_four_files_round_trips() {
         std::fs::write(&p, &img).unwrap();
         let out = std::process::Command::new("fsck_msdos").arg("-n").arg(&p).output().unwrap();
         let _ = std::fs::remove_file(&p);
-        assert!(out.status.success(), "fsck_msdos: {}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success(), "fsck_msdos: {text}");
+        assert!(!text.contains("Fix?"), "fsck_msdos wants to change something: {text}");
     }
 }
 

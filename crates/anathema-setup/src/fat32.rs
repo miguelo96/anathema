@@ -189,8 +189,8 @@ pub fn build(total_sectors: u64, hidden: u32, label: &str, files: &[FileSpec]) -
     let mut info = vec![0u8; 512];
     put32(&mut info, 0, 0x4161_5252);
     put32(&mut info, 484, 0x6141_7272);
-    put32(&mut info, 488, 0xFFFF_FFFF);
-    put32(&mut info, 492, 0xFFFF_FFFF);
+    put32(&mut info, 488, (clusters - (next - 2)) as u32);
+    put32(&mut info, 492, next as u32);
     info[510] = 0x55;
     info[511] = 0xAA;
 
