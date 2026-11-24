@@ -509,6 +509,32 @@ unsafe fn install_commpage_enter(blob: &[u8]) {
     com1("anathema-xboot: commpage fixed locator hook installed\n");
 }
 
+// starts kexts that have no matching personality (tmpfs, the fs compression types) by calling the kernel's own
+// OSKext::loadKextWithIdentifier right before launchd starts. code lives in the spare part of the kext block.
+const LOAD_INIT_PA: u64 = 0x7e_0bc0;
+
+unsafe fn install_loadkexts(blob: &[u8]) {
+    if CP_STORE_VA == 0 || blob.len() < 0x40 || blob.len() > 0x700 {
+        com1("anathema-xboot: loadkexts stub not installed\n");
+        return;
+    }
+    let site = LOAD_INIT_PA as *mut u8;
+    let want = [0x55u8, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56];
+    for (k, b) in want.iter().enumerate() {
+        if *site.add(k) != *b {
+            com1("anathema-xboot: load_init_program bytes differ, loadkexts not installed\n");
+            return;
+        }
+    }
+    let dst_va = CP_STORE_VA - 0x800 + 0x900;
+    core::ptr::copy_nonoverlapping(blob.as_ptr(), dst_va.wrapping_sub(KBASE) as *mut u8, blob.len());
+    let rel = (dst_va as i64 - (KBASE as i64 + LOAD_INIT_PA as i64 + 5)) as i32;
+    *site = 0xe9;
+    core::ptr::copy_nonoverlapping(rel.to_le_bytes().as_ptr(), site.add(1), 4);
+    *site.add(5) = 0x90;
+    com1("anathema-xboot: loadkexts hook installed\n");
+}
+
 unsafe fn install_commpage(blob: &[u8]) {
     let n = blob.len().min(0x400);
     core::ptr::copy_nonoverlapping(blob.as_ptr(), CP_PA as *mut u8, n);
@@ -736,6 +762,7 @@ fn main() -> Status {
     let have_kext = kext_blob.len() > 32 && rd64(&kext_blob, 0) == 0x434b_5841_4e41;
     let cp_blob: Vec<u8> = fs.read(cstr16!("\\anathema\\xcp.bin")).unwrap_or_default();
     let cp2_blob: Vec<u8> = fs.read(cstr16!("\\anathema\\xcp2.bin")).unwrap_or_default();
+    let cp3_blob: Vec<u8> = fs.read(cstr16!("\\anathema\\xcp3.bin")).unwrap_or_default();
     let kern = match parse(&kernel_file) {
         Ok(k) => k,
         Err(e) => return fail(e),
@@ -900,6 +927,9 @@ fn main() -> Status {
         }
         if !cp2_blob.is_empty() {
             install_commpage_enter(&cp2_blob);
+        }
+        if !cp3_blob.is_empty() {
+            install_loadkexts(&cp3_blob);
         }
         let empty: &[Patch] = &[];
         let lists: [&[Patch]; 4] = [
