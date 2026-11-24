@@ -3,3 +3,7 @@
 
 pub mod cpio;
 pub mod pbzx;
+
+pub mod hfs;
+pub mod udif;
+pub mod xar;
