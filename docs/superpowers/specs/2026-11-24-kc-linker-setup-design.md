@@ -124,8 +124,8 @@ So in practice walk order only moves pseudo-kexts within the plist. `xkc.bin` st
   4. Thin and check the kernel UUID.
   5. Run the linker with the `mkkc.sh` options.
   6. Hold `xkernel` and `xkc.bin` in memory or in the cache folder.
-  - A marker file per KDK records a finished extraction, so a second run skips steps 2 and 3.
-  - Downloaded dmgs are deleted after a verified extraction, to give the space back.
+  - A marker file per KDK records a finished extraction, so an interrupted run resumes after the last finished step.
+  - Downloaded dmgs are deleted after a verified extraction, and the extracted trees after a good link. Only `out/xkernel`, `out/xkc.bin` and a stamp are kept (about 30 MB). The stamp hashes the pins, the link options and the setup version, so a rerun needs no download unless one of those changes (builder's call, to give about 2 GB back).
 - The `mkkc.sh` options live in one Rust constant (roots, prefer-last list, strip, codeless, base `0xffffff8002000000`), so they are easy to keep in step with the shell script.
 - `xcp.bin` is our own code, built from `tools/commpage_stub.c`. It is embedded in the exe from a committed binary, with a script that rebuilds it.
 - `fat32.rs` becomes a general builder for a small file tree:

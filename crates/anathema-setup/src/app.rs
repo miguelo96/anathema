@@ -3,6 +3,7 @@
 use crate::disk::{self, Disk};
 use crate::install::{self, Mode};
 use crate::logo::{self, EMBER, EMBER_DIM};
+use anathema_setup::kernel_files::{self, KernelFiles};
 use eframe::egui::{self, Color32, FontId, RichText, Stroke};
 use std::{
     path::PathBuf,
@@ -154,6 +155,13 @@ impl App {
     }
 }
 
+fn download_note() -> String {
+    format!(
+        "Downloads about {:.1} GB of Apple kernel files from dortania's GitHub releases (once) and builds the kernel files on this PC",
+        kernel_files::DOWNLOAD_BYTES as f64 / 1e9
+    )
+}
+
 fn run_install(
     shared: &Arc<Mutex<Shared>>,
     disk: &Disk,
@@ -174,16 +182,31 @@ fn run_install(
     let log_shared = shared.clone();
     let progress_shared = shared.clone();
     let mut log = move |line: String| push_log(&log_shared, line);
-    let mut progress = move |value: f32, stage: &str| {
+    let progress = move |value: f32, stage: &str| {
         if let Ok(mut state) = progress_shared.lock() {
             state.progress = value;
             state.stage = stage.to_owned();
         }
     };
-    let mut ctx = install::Context { dry_run, log: &mut log, progress: &mut progress };
+    // the kernel files take the first 60% of the bar, writing the stick the rest
+    let kernel = if dry_run {
+        log(format!(
+            "Would download about {:.1} GB of Kernel Debug Kits from dortania's GitHub releases and build the kernel files",
+            kernel_files::DOWNLOAD_BYTES as f64 / 1e9
+        ));
+        KernelFiles { xkernel: Vec::new(), xkc: Vec::new() }
+    } else {
+        let cache = kernel_files::default_cache()?;
+        std::fs::create_dir_all(&cache).map_err(|e| format!("cannot create {}: {e}", cache.display()))?;
+        let free = disk::free_bytes(&cache.display().to_string());
+        kernel_files::prepare(&cache, free, &mut |value, stage| progress(0.6 * value, stage), &mut log)?
+    };
+    let files = kernel_files::esp_files(&efi, &kernel);
+    let mut install_progress = |value: f32, stage: &str| progress(0.6 + 0.4 * value, stage);
+    let mut ctx = install::Context { dry_run, log: &mut log, progress: &mut install_progress };
     match mode {
-        Mode::UpdateBoot => install::update_boot(disk, &efi, &mut ctx),
-        Mode::Fresh => install::fresh_install(disk, &efi, &mut ctx),
+        Mode::UpdateBoot => install::update_boot(disk, &efi, &files, &mut ctx),
+        Mode::Fresh => install::fresh_install(disk, &files, &mut ctx),
     }
 }
 
@@ -327,7 +350,7 @@ impl App {
             logo::draw(ui, 150.0);
             ui.add_space(6.0);
             ui.label(RichText::new("ANATHEMA").size(34.0).color(EMBER).strong());
-            ui.label(RichText::new("boot arm macOS on this pc").color(DIM).size(15.0));
+            ui.label(RichText::new("boot macOS on this pc").color(DIM).size(15.0));
             ui.add_space(18.0);
             ui.label(
                 RichText::new(
@@ -439,6 +462,8 @@ impl App {
                 card(ui, false, |ui| {
                     ui.label(RichText::new("Will be written").color(EMBER).strong());
                     ui.label("EFI partition: EFI/BOOT/BOOTX64.EFI and EFI/anathema/anathema.efi");
+                    ui.label("Kernel files: anathema\\xkernel, xkc.bin and xcp.bin");
+                    ui.label(download_note());
                     ui.label(RichText::new(format!("Boot image {} bytes", EFI.len())).color(DIM).size(12.0));
                     let backup = install::backup_target(&disk)
                         .map(|p| p.display().to_string())
@@ -448,7 +473,7 @@ impl App {
                 card(ui, false, |ui| {
                     ui.label(RichText::new("Kept as it is").color(OK).strong());
                     match prepared {
-                        Some(bytes) => ui.label(format!("{} of macOS data stays untouched, nothing is downloaded", gb(bytes))),
+                        Some(bytes) => ui.label(format!("{} of macOS data stays untouched", gb(bytes))),
                         None => ui.label("Nothing else on the stick is changed"),
                     };
                 });
@@ -458,6 +483,8 @@ impl App {
                 card(ui, false, |ui| {
                     ui.label(RichText::new("Will be written").color(EMBER).strong());
                     ui.label("New GPT: 200 MiB FAT32 EFI partition with EFI/BOOT/BOOTX64.EFI");
+                    ui.label("Kernel files: anathema\\xkernel, xkc.bin and xcp.bin");
+                    ui.label(download_note());
                     ui.label("Data partition for macOS media (exFAT) on the rest");
                 });
                 card(ui, false, |ui| {
