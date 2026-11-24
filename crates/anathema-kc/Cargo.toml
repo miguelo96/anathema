@@ -1,0 +1,12 @@
+[package]
+name = "anathema-kc"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "Link Intel kexts from a Kernel Debug Kit into the prelinked block anathema-xboot loads (port of tools/kcbuild.py)"
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+anathema-media = { path = "../anathema-media" }

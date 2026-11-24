@@ -90,6 +90,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "anathema-kc"
+version = "0.1.0"
+dependencies = [
+ "anathema-media",
+ "anyhow",
+ "base64 0.22.1",
+]
+
+[[package]]
 name = "anathema-media"
 version = "0.1.0"
 dependencies = [
