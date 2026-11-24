@@ -713,7 +713,9 @@ fn main() -> Status {
         let r = core::arch::x86_64::__cpuid(0);
         r.ebx == 0x6874_7541 && r.edx == 0x6974_6e65 && r.ecx == 0x444d_4163
     };
-    let want_amd_patch = is_amd || fs.read(cstr16!("\\anathema\\xpatch-amd")).is_ok();
+    let want_amd_patch = is_amd
+        || fs.read(cstr16!("\\anathema\\xpatch-amd")).is_ok()
+        || fs.read(cstr16!("\\anathema\\xpatch-spoof")).is_ok();
     if is_amd {
         println!("amd cpu detected: applying the amd patches");
     }
