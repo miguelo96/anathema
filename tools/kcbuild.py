@@ -155,6 +155,7 @@ def main():
     ap.add_argument("--strip", action="append", default=[], help="BUNDLE_ID:KEY removed from that bundle's plist record")
     ap.add_argument("--set-true", action="append", default=[], help="BUNDLE_ID:KEY set to true in that bundle's plist record")
     ap.add_argument("--rename", action="append", default=[], help="OLD_ID=NEW_ID rename in the plist record only")
+    ap.add_argument("--add-lib", action="append", default=[], help="BUNDLE_ID:LIB_ID:VERSION added to that record's OSBundleLibraries")
     ap.add_argument("--prefer-last", action="append", default=[], help="bundle ids taken from the last --ext dir when present there")
     ap.add_argument("roots", nargs="+")
     a = ap.parse_args()
@@ -178,7 +179,12 @@ def main():
         libs = inf.get("OSBundleLibraries_x86_64")
         if libs is None:
             libs = inf.get("OSBundleLibraries")
-        return list(libs or {})
+        out = list(libs or {})
+        for al in a.add_lib:
+            ab, al_id, al_ver = al.split(":", 2)
+            if ab == bid and al_id not in out:
+                out.append(al_id)
+        return out
     # selection: closure over OSBundleLibraries, plus every pseudo kext (OSKernelResource)
     chosen, order = set(), []
 
@@ -338,6 +344,15 @@ def main():
             sb, sk = st.split(":", 1)
             if sb == e["bid"]:
                 d.pop(sk, None)
+        for al in a.add_lib:
+            ab, al_id, al_ver = al.split(":", 2)
+            if ab == e["bid"]:
+                for key in ("OSBundleLibraries", "OSBundleLibraries_x86_64"):
+                    if key in d:
+                        d[key] = dict(d[key])
+                        d[key][al_id] = al_ver
+                if "OSBundleLibraries" not in d and "OSBundleLibraries_x86_64" not in d:
+                    d["OSBundleLibraries"] = {al_id: al_ver}
         for rn in a.rename:
             ro, rnw = rn.split("=", 1)
             if ro == e["bid"]:
@@ -367,6 +382,10 @@ def main():
         cc_kmod = ccs[0]["kmod"]
     head = struct.pack("<QQQQQQQQ", 0x434b58414e41, base, total, plist_off, len(plist), cc_start, cc_kmod, len(blob))
     open(a.out, "wb").write(head + bytes(blob))
+    with open(a.out + ".map", "w") as mf:
+        for e in entries:
+            if e["exe"]:
+                mf.write("%s %#x %#x %s\n" % (e["bid"], e["load"], e["size"], e["exe"]))
     print("kexts selected: %d (with code: %d)" % (len(entries), sum(1 for e in entries if e["exe"])))
     print("block %#x bytes, plist %d bytes, relocs: %s" % (total, len(plist), counts))
     print("corecrypto start %#x kmod %#x" % (cc_start, cc_kmod))

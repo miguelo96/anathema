@@ -211,7 +211,13 @@ fn device_tree() -> Vec<u8> {
     let seed = random_seed();
     let chosen = node(&[("name", b"chosen\0"), ("random-seed", &seed)], &[memory_map]);
     let fsb = 100_000_000u64.to_le_bytes();
-    let platform = node(&[("name", b"platform\0"), ("FSBFrequency", &fsb)], &[]);
+    // the kernel waits forever for the platform uuid resource, which on x86 it derives from a 16 byte
+    // system-id on /efi/platform (a real mac takes it from the smbios system uuid)
+    let (sa, sb) = unsafe { (rdrand64(), rdrand64()) };
+    let mut sysid = [0u8; 16];
+    sysid[..8].copy_from_slice(&sa.to_le_bytes());
+    sysid[8..].copy_from_slice(&sb.to_le_bytes());
+    let platform = node(&[("name", b"platform\0"), ("FSBFrequency", &fsb), ("system-id", &sysid)], &[]);
     // one node per firmware configuration table, named by its GUID: the acpi driver finds its root
     // table (and smbios) at /efi/configuration-table/<GUID> in the "table" property.
     let mut cfg_nodes: Vec<Vec<u8>> = Vec::new();
@@ -241,7 +247,8 @@ fn device_tree() -> Vec<u8> {
     }
     let cfg_table = node(&[("name", b"configuration-table\0")], &cfg_nodes);
     let efi = node(&[("name", b"efi\0")], &[platform, cfg_table]);
-    node(&[("name", b"device-tree\0"), ("compatible", b"ACPI\0"), ("model", b"Anathema1,1\0")], &[chosen, efi])
+    let options = node(&[("name", b"options\0"), ("platform-uuid", &sysid)], &[]);
+    node(&[("name", b"device-tree\0"), ("compatible", b"ACPI\0"), ("model", b"Anathema1,1\0")], &[chosen, efi, options])
 }
 
 // a minimal MH_FILESET kernel collection header: one segment covering the kernel and one entry, the kernel itself.
@@ -259,8 +266,8 @@ fn fake_kc(info_addr: u64, info_size: u64) -> Vec<u8> {
     w32(&mut h, 0x0100_0007);
     w32(&mut h, 3);
     w32(&mut h, 0xc);
-    w32(&mut h, 3);
-    w32(&mut h, 72 + 152 + 56);
+    w32(&mut h, 4);
+    w32(&mut h, 72 + 152 + 72 + 56);
     w32(&mut h, 0);
     w32(&mut h, 0);
     // LC_SEGMENT_64 __TEXT
@@ -303,6 +310,21 @@ fn fake_kc(info_addr: u64, info_size: u64) -> Vec<u8> {
     w32(&mut h, 0);
     w32(&mut h, 0);
     w32(&mut h, 0);
+    w32(&mut h, 0);
+    w32(&mut h, 0);
+    // LC_SEGMENT_64 __LINKEDIT (empty): the kernel jettisons the collection's linkedit segment and
+    // panics if the header has none
+    w32(&mut h, 0x19);
+    w32(&mut h, 72);
+    let mut ln = [0u8; 16];
+    ln[..10].copy_from_slice(b"__LINKEDIT");
+    h.extend_from_slice(&ln);
+    w64(&mut h, KBASE + 0x20_0000 + 0x105_2000);
+    w64(&mut h, 0);
+    w64(&mut h, 0);
+    w64(&mut h, 0);
+    w32(&mut h, 1);
+    w32(&mut h, 1);
     w32(&mut h, 0);
     w32(&mut h, 0);
     // LC_FILESET_ENTRY com.apple.kernel
@@ -628,6 +650,10 @@ fn main() -> Status {
         if have_kext {
             install_kc(&kext_blob);
         }
+        // gIOPlatformUUIDAndSerialDone: on intel the platform uuid is only published once the nvram
+        // driver registers, and the security-extension step waits forever for it. until nvram has
+        // runtime services behind it, mark it done so the kernel moves on.
+        *((0x10_526c0u64) as *mut u8) = 1;
         if cp_blob.len() >= 0x100 {
             install_commpage(&cp_blob);
         }
