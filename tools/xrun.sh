@@ -18,7 +18,7 @@ if [ -n "$XTSC" ]; then : > /tmp/xpatch-tsc; mcopy -i xesp.img /tmp/xpatch-tsc :
 if [ -n "$XAMD" ]; then : > /tmp/xpatch-amd; mcopy -i xesp.img /tmp/xpatch-amd ::/anathema/xpatch-amd; fi
 cp /usr/share/OVMF/OVMF_VARS_4M.fd /tmp/xvars.fd
 rm -f /tmp/qmon.sock /tmp/xserial.log
-qemu-system-x86_64 -machine ${QMACH:-q35} -cpu ${QCPU:-Haswell} -m 2G -smp 1 -accel tcg -display none -no-reboot \
+qemu-system-x86_64 -machine ${QMACH:-q35} -cpu ${QCPU:-Haswell} -m 2G -smp ${QSMP:-1} -accel tcg -display none -no-reboot \
   -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
   -drive if=pflash,format=raw,file=/tmp/xvars.fd \
   -drive file=/tmp/xesp.img,format=raw,if=virtio \
