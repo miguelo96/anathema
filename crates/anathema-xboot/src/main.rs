@@ -69,6 +69,12 @@ const EARLY_VM_PATCHES: &[Patch] = &[
         why: "skip commpage_update_mach_continuous_time",
     },
     Patch {
+        va: 0xffff_ff80_0026_7de0,
+        expect: &[0x55, 0x48, 0x89, 0xe5],
+        replace: &[0xc3, 0x90, 0x90, 0x90],
+        why: "skip arcade_ast (kills user processes that never register with the arcade daemon)",
+    },
+    Patch {
         va: 0xffff_ff80_003d_6b20,
         expect: &[0x55, 0x48, 0x89, 0xe5],
         replace: &[0xc3, 0x90, 0x90, 0x90],
