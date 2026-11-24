@@ -46,6 +46,24 @@ const NOKEXT_PATCHES: &[Patch] = &[Patch {
 
 const EARLY_VM_PATCHES: &[Patch] = &[
     Patch {
+        va: 0xffff_ff80_0040_2ea0,
+        expect: &[0x55, 0x48, 0x89, 0xe5],
+        replace: &[0xc3, 0x90, 0x90, 0x90],
+        why: "skip commpage_update_mach_approximate_time (interrupt-time write that faults sporadically)",
+    },
+    Patch {
+        va: 0xffff_ff80_0040_2ef0,
+        expect: &[0x55, 0x48, 0x89, 0xe5],
+        replace: &[0xc3, 0x90, 0x90, 0x90],
+        why: "skip commpage_update_mach_continuous_time",
+    },
+    Patch {
+        va: 0xffff_ff80_003d_6b20,
+        expect: &[0x55, 0x48, 0x89, 0xe5],
+        replace: &[0xc3, 0x90, 0x90, 0x90],
+        why: "skip x86_64_protect_data_const (kexts that start late write to constant data)",
+    },
+    Patch {
         va: 0xffff_ff80_0082_6a90,
         expect: &[0x55, 0x48, 0x89, 0xe5],
         replace: &[0xc3, 0x90, 0x90, 0x90],
@@ -345,6 +363,46 @@ fn fake_kc(info_addr: u64, info_size: u64) -> Vec<u8> {
 // then the blob. the block is copied to its address and declared to the kernel through the empty
 // __PRELINK_TEXT segment of its own in-memory header (finalize marks such segments rwx).
 
+// a stub EFI runtime services table: valid signature and checksum, every service returns
+// EFI_NOT_FOUND. lets the nvram driver start (the kernel only publishes the platform uuid once it has
+// registered) without the firmware's real runtime services, which can't be mapped yet.
+unsafe fn install_runtime_stub(rt_va: u64) {
+    let pa = (rt_va - KBASE) as *mut u8;
+    core::ptr::write_bytes(pa, 0, 0x1000);
+    let stub_va = rt_va + 0x100;
+    let code: [u8; 11] = [0x48, 0xb8, 0x0e, 0, 0, 0, 0, 0, 0, 0x80, 0xc3];
+    core::ptr::copy_nonoverlapping(code.as_ptr(), pa.add(0x100), code.len());
+    let mut t = [0u8; 24 + 14 * 8];
+    t[0..8].copy_from_slice(&0x5652_4553_544e_5552u64.to_le_bytes());
+    t[8..12].copy_from_slice(&0x0002_0000u32.to_le_bytes());
+    let tl = t.len() as u32;
+    t[12..16].copy_from_slice(&tl.to_le_bytes());
+    for i in 0..14 {
+        t[24 + i * 8..32 + i * 8].copy_from_slice(&stub_va.to_le_bytes());
+    }
+    let c = crc32(&t);
+    t[16..20].copy_from_slice(&c.to_le_bytes());
+    core::ptr::copy_nonoverlapping(t.as_ptr(), pa, t.len());
+}
+
+// a stand-in for the amfi interface the kernel calls through (struct of function pointers at the
+// kernel's `amfi` global): every entry is a stub returning 0, meaning no entitlement present and
+// nothing denied. tahoe's amfi can't serve the 27 kernel's entitlement bridge, and nothing needs it to
+// reach a root mount.
+const AMFI_GLOBAL_PA: u64 = 0x117_d1d8;
+
+unsafe fn install_amfi_standin(va: u64) {
+    let pa = (va - KBASE) as *mut u8;
+    core::ptr::write_bytes(pa, 0, 0x1000);
+    let stub_va = va + 0x800;
+    let code: [u8; 3] = [0x31, 0xc0, 0xc3];
+    core::ptr::copy_nonoverlapping(code.as_ptr(), pa.add(0x800), code.len());
+    for i in 0..(0x800 / 8) {
+        core::ptr::copy_nonoverlapping(stub_va.to_le_bytes().as_ptr(), pa.add(i * 8), 8);
+    }
+    core::ptr::copy_nonoverlapping(va.to_le_bytes().as_ptr(), AMFI_GLOBAL_PA as *mut u8, 8);
+}
+
 unsafe fn install_kc(blob: &[u8]) {
     let base_va = rd64(blob, 8);
     let total = rd64(blob, 16);
@@ -366,6 +424,8 @@ unsafe fn install_kc(blob: &[u8]) {
         }
         o += sz;
     }
+    install_runtime_stub(base_va + blen as u64 - 0x2000);
+    install_amfi_standin(base_va + blen as u64 - 0x1000);
     com1("anathema-xboot: kext block installed\n");
 }
 
@@ -413,7 +473,7 @@ fn crc32(data: &[u8]) -> u32 {
 }
 
 // a copy of the firmware system table with no runtime services, so the kernel only reads the acpi table list
-fn fake_system_table(at: u64) -> Vec<u8> {
+fn fake_system_table(at: u64, rt_va: u64) -> Vec<u8> {
     let mut out = vec![0u8; 0x2000];
     if let Some(st) = uefi::table::system_table_raw() {
         let src = st.as_ptr() as *const u8;
@@ -424,7 +484,7 @@ fn fake_system_table(at: u64) -> Vec<u8> {
             let cfg = core::ptr::read_unaligned(src.add(112) as *const u64) as *const u8;
             let bytes = (n * 24).min(0x800);
             core::ptr::copy_nonoverlapping(cfg, out.as_mut_ptr().add(0x800), bytes);
-            out[88..96].copy_from_slice(&0u64.to_le_bytes());
+            out[88..96].copy_from_slice(&rt_va.to_le_bytes());
             out[104..112].copy_from_slice(&((bytes / 24) as u64).to_le_bytes());
             out[112..120].copy_from_slice(&(at + 0x800).to_le_bytes());
             out[16..20].copy_from_slice(&0u32.to_le_bytes());
@@ -553,7 +613,8 @@ fn main() -> Status {
     };
     let kc = fake_kc(kc_plist_va, kc_plist_len);
     let est_pa = kc_pa + 0x1000;
-    let est = fake_system_table(est_pa);
+    let rt_va = if have_kext { rd64(&kext_blob, 8) + rd64(&kext_blob, 56) - 0x2000 } else { 0 };
+    let est = fake_system_table(est_pa, rt_va);
     let final_end = kc_pa + 0x3000;
     let ksize_end = if have_kext { final_end.max(rd64(&kext_blob, 8) - KBASE + rd64(&kext_blob, 56)) } else { final_end };
     let kaddr = 0x100000u64;

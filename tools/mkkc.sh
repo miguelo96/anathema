@@ -11,9 +11,8 @@ python3 ~/xtools/kcbuild.py --kernel ~/anathema-work/x86k/kernel \
   --prefer-last com.apple.security.AppleImage4 \
   --strip com.apple.security.AppleImage4:AppleSecurityExtension \
   --strip com.apple.kext.CoreTrust:AppleSecurityExtension \
-  --strip com.apple.driver.AppleMobileFileIntegrity:AppleSecurityExtension \
-  --add-lib com.apple.kec.pthread:com.apple.driver.AppleMobileFileIntegrity:1.0 \
+  --codeless com.apple.driver.AppleMobileFileIntegrity \
   --base 0xffffff8002000000 --out $HOME/anathema-work/xkc.bin $MKKC_OPTS \
   com.apple.driver.AppleACPIPlatform com.apple.kec.corecrypto com.apple.kec.AppleEncryptedArchive \
   com.apple.kec.XrtHostedXnu com.apple.kec.Libm com.apple.kec.Compression com.apple.kec.pthread \
-  com.apple.security.AppleImage4 com.apple.driver.AppleMobileFileIntegrity com.apple.kext.CoreTrust "$@"
+  com.apple.security.AppleImage4 com.apple.kext.CoreTrust "$@"

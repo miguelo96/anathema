@@ -17,7 +17,10 @@ static void *mk(void)
 {
 	pcreate_t pc = (pcreate_t)PMAP_CREATE_OPTIONS;
 	mcreate_t mc = (mcreate_t)VM_MAP_CREATE_OPTIONS;
-	return mc(pc(0, 0, 0), 0, AREA, 0);
+	unsigned char *m = (unsigned char *)mc(pc(0, 0, 0), 0, AREA, 0);
+	/* vmmap_sealed = VM_MAP_WILL_BE_SEALED: a 2 bit field at bit 0x5d5 of struct vm_map */
+	m[0xba] = (unsigned char)((m[0xba] & ~0x60) | 0x20);
+	return m;
 }
 
 __attribute__((section(".text.a"))) void anx_commpage_init(void)

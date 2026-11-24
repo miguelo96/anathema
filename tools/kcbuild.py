@@ -156,6 +156,7 @@ def main():
     ap.add_argument("--set-true", action="append", default=[], help="BUNDLE_ID:KEY set to true in that bundle's plist record")
     ap.add_argument("--rename", action="append", default=[], help="OLD_ID=NEW_ID rename in the plist record only")
     ap.add_argument("--add-lib", action="append", default=[], help="BUNDLE_ID:LIB_ID:VERSION added to that record's OSBundleLibraries")
+    ap.add_argument("--codeless", action="append", default=[], help="bundle ids kept in the plist without their executable")
     ap.add_argument("--prefer-last", action="append", default=[], help="bundle ids taken from the last --ext dir when present there")
     ap.add_argument("roots", nargs="+")
     a = ap.parse_args()
@@ -212,6 +213,8 @@ def main():
         b = bundles[bid]
         exe = b["info"].get("CFBundleExecutable")
         ep = None
+        if exe and bid in a.codeless:
+            exe = None
         if exe and not b["info"].get("OSKernelResource"):
             for cand in (os.path.join(b["path"], "Contents", "MacOS", exe), os.path.join(b["path"], exe)):
                 if os.path.exists(cand):
@@ -244,6 +247,12 @@ def main():
                 deps_closure(lib, seen)
         return seen
 
+    # blob layout: [kexts total][pad to page][plist][pad to page?]...[2 spare pages]; the stand-in amfi stub
+    # (xor eax,eax; ret) sits at spare page 2 + 0x800. the plist length is not known yet, so the stub is
+    # placed by a fixed offset from the kext block end instead: see PLIST_RESERVE below.
+    STUB_VA = [0]
+    PLIST_RESERVE = 0x80000
+    STUB_VA[0] = cur + PLIST_RESERVE + 0x1000 + 0x800
     missing = {}
     counts = dict(ext64=0, branch=0, rebase=0)
     for e in entries:
@@ -273,7 +282,7 @@ def main():
                         break
             if addr is None:
                 missing.setdefault(nm, set()).add(e["bid"])
-                addr = 0
+                addr = STUB_VA[0]
             cache[nm] = addr
             return addr
 
@@ -340,6 +349,9 @@ def main():
     for e in entries:
         b = e["b"]
         d = dict(b["info"])
+        if e["bid"] in a.codeless:
+            d.pop("CFBundleExecutable", None)
+            d.pop("IOKitPersonalities", None)
         for st in a.strip:
             sb, sk = st.split(":", 1)
             if sb == e["bid"]:
@@ -375,6 +387,10 @@ def main():
     plist_off = (total + PAGE - 1) & ~(PAGE - 1)
     blob = bytearray(plist_off) + plist
     blob[:total] = block
+    if len(plist) > PLIST_RESERVE:
+        sys.exit("plist larger than the reserved %#x bytes" % PLIST_RESERVE)
+    blob += bytes(PLIST_RESERVE - len(plist))
+    blob += bytes(0x2000)  # two spare pages: stub efi runtime table, stand-in amfi interface
     ccs = [e for e in entries if e["bid"] == "com.apple.kec.corecrypto" and e["exe"]]
     cc_start = cc_kmod = 0
     if ccs:
