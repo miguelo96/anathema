@@ -822,6 +822,27 @@ fn main() -> Status {
     ba[1256..1264].copy_from_slice(&(KBASE + kc_pa).to_le_bytes());
     ba[1104..1108].copy_from_slice(&((est_pa) as u32).to_le_bytes());
 
+    // uefi framebuffer -> boot_args.Video so the kernel's console draws on the real screen
+    if let Ok(h) = boot::get_handle_for_protocol::<uefi::proto::console::gop::GraphicsOutput>() {
+        if let Ok(mut gop) = boot::open_protocol_exclusive::<uefi::proto::console::gop::GraphicsOutput>(h) {
+            let info = gop.current_mode_info();
+            let (w, hgt) = info.resolution();
+            let stride = info.stride();
+            let fb = gop.frame_buffer().as_mut_ptr() as u64;
+            if fb != 0 && fb < 0x1_0000_0000 {
+                ba[1048..1052].copy_from_slice(&(fb as u32).to_le_bytes());
+                let disp: u32 = if args.split_whitespace().any(|a| a == "-v") { 2 } else { 1 };
+                ba[1052..1056].copy_from_slice(&disp.to_le_bytes());
+                ba[1056..1060].copy_from_slice(&((stride * 4) as u32).to_le_bytes());
+                ba[1060..1064].copy_from_slice(&(w as u32).to_le_bytes());
+                ba[1064..1068].copy_from_slice(&(hgt as u32).to_le_bytes());
+                ba[1068..1072].copy_from_slice(&32u32.to_le_bytes());
+                println!("framebuffer: {}x{} stride {} at {:#x}", w, hgt, stride, fb);
+            } else {
+                println!("framebuffer above 4 GB or missing, not passed ({:#x})", fb);
+            }
+        }
+    }
     if !args.is_empty() {
         println!("command line: {}", args);
     }
