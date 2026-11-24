@@ -1,5 +1,5 @@
 use crate::disk::{self, Disk, NewPart, Part};
-use crate::fat32;
+use anathema_setup::fat32;
 use std::{
     fs,
     io::{Seek, SeekFrom, Write},
@@ -237,7 +237,12 @@ pub fn fresh_install(disk: &Disk, efi: &[u8], ctx: &mut Context) -> Result<(), S
         thread::sleep(Duration::from_millis(1500));
     }
     (ctx.progress)(0.35, "Formatting the EFI partition");
-    let regions = fat32::build(ESP_BYTES / 512, (esp_offset / 512) as u32, "ANATHEMA", efi)?;
+    let regions = fat32::build(
+        ESP_BYTES / 512,
+        (esp_offset / 512) as u32,
+        "ANATHEMA",
+        &[fat32::FileSpec { path: "EFI/BOOT/BOOTX64.EFI", data: efi }],
+    )?;
     (ctx.log)(format!("FAT32 EFI partition with EFI/BOOT/BOOTX64.EFI ({} bytes)", efi.len()));
     if !ctx.dry_run {
         let mut guard = None;
