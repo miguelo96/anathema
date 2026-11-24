@@ -719,7 +719,7 @@ fn main() -> Status {
     }
     // tsc speed in units of the 100 MHz bus, measured against the firmware timer: the kernel's tsc_init
     // reads it from MSR_PLATFORM_INFO, which qemu leaves at zero and amd cpus don't have
-    let tsc_ratio: u32 = if want_tsc_patch || want_amd_patch {
+    let tsc_ratio: u32 = if want_tsc_patch || want_amd_patch || true {
         let t0 = unsafe { core::arch::x86_64::_rdtsc() };
         boot::stall(100_000);
         let t1 = unsafe { core::arch::x86_64::_rdtsc() };
