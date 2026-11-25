@@ -1,14 +1,60 @@
 # Anathema
 
-An experiment in booting arm64 macOS on an x86-64 PC by translating the arm64 kernel and userland to x86-64 ourselves, with our own firmware, loader and virtual hardware.
+Boot **macOS 27** on a regular PC with **our own boot loader**. No OpenCore. Anathema starts Apple's real Intel macOS 27 kernel from a UEFI loader, loads the kexts it needs, and brings up Apple's real userspace on top.
 
-**This is fully vibe coded.** Every line was written by an AI (Claude Code) under human direction. It has not been audited, it has bugs, and a lot of it was written by trial and error against a real macOS kernel. Read it as a research log that happens to compile.
+**Join us:** https://discord.gg/ZSQxYC8RT7 · [FAQ](FAQ.md) · [Contributing](CONTRIBUTING.md) · [TODO](TODO.md) · [ideas](https://github.com/riftaway7-code/anathema-ideas)
 
-**Nothing here boots to a macOS desktop.** See [Status](#status) for exactly how far it gets.
+**This is fully vibe coded.** Every line was written by an AI (Claude Code) under human direction. It has bugs, it has not been audited, and a lot of it was found by trial and error against a real macOS kernel. Read it as a research log that happens to work.
 
-**New here?** Read the [FAQ](FAQ.md) first: what this is, whether you can try it, which hardware matters and how to help. Feature ideas live in the [ideas repo](https://github.com/riftaway7-code/anathema-ideas) ([sorted index](https://github.com/riftaway7-code/anathema-ideas/blob/main/INDEX.md)).
+## Where it stands (updated 2026-11-24)
 
-## What it is
+Everything below was tested in QEMU (UEFI, USB stick, SATA and NVMe disks). **Nothing has been tried on a real PC yet except the early loader bring-up.**
+
+Working:
+
+* **Own UEFI loader** (`crates/anathema-xboot`) starts the macOS 27.2 Intel kernel (`xnu-13432.41.4`, build 26B131) from a USB stick: memory map, device tree, boot args, patches, and the UEFI framebuffer for on-screen boot text.
+* **Kext collection built by us** (`tools/kcbuild.py`, Rust port in an open PR): links Apple's Intel kexts from the Tahoe and macOS 27 KDKs into one block the kernel loads. Storage (AHCI, NVMe, USB mass storage), USB, ACPI, APFS/HFS+, tmpfs and filesystem compression.
+* **Real userspace**: Apple's launchd, syslogd, bash, dyld and the real dyld shared cache run on the kernel. The commpage is mapped by a loader hook, and a stand-in Sandbox policy keeps launchd's service lookups working.
+* **Apple's recovery environment** (the x86_64 BaseSystem, APFS) boots and stays up.
+* **CPUs**: Intel (Haswell to Cascade Lake in QEMU) and AMD (the loader detects it and patches CPU identification and timing; one core in QEMU).
+* A `tools/` kit to build a GPT USB image: ESP with the loader, kernel and kexts, plus a root partition.
+
+In progress:
+
+* **Graphics and the installer window.** The NVIDIA GPU driver by NullMoth (RTX 20/30/40/50, separate noncommercial license) is being wired in; WindowServer and the installer need it.
+* **USB keyboard and mouse** in the recovery environment.
+* **Real hardware tests** and a setup tool that builds the stick on Windows (open PR).
+
+Not working yet: Wi-Fi, audio, Bluetooth, sleep, AMD multi-core in the emulator, and anything on real hardware beyond the loader bring-up.
+
+## How it works
+
+```
+UEFI firmware -> anathema-xboot (loader) -> macOS 27 Intel kernel
+                     |                          |
+                     |  patches + stand-ins     |  our kext collection
+                     v                          v
+              commpage, sandbox,          storage, USB, APFS, ...
+              amfi, runtime services            |
+                                                v
+                                   Apple's launchd, dyld, recovery
+```
+
+The loader gives the kernel what a Mac's firmware normally would (a fake EFI environment and kernel-collection header), applies a short list of byte patches for things the Intel kernel expects from Apple hardware, and adds small stand-ins in code space for pieces we can't run (trust cache, AMFI, sandbox). `TODO.md` lists what each stand-in should become.
+
+## Try it / help
+
+* Test on real hardware and report in the Discord `hardware-support` channel.
+* Pick a task from [TODO.md](TODO.md) and say so in `dev-talk`.
+* The repo contains no Apple software: the tools download what they need.
+
+---
+
+## Research track: arm64 translation (the original approach)
+
+Anathema started as an attempt to boot the *arm64* macOS 27 VM kernel on an x86-64 PC by translating arm64 to x86-64. That work (the crates below) is kept as a research track; the native Intel path above is what's moving fast.
+
+### What it is
 
 Anathema targets the **VirtualMac2,1 (`vma2macosap`)** build of macOS 27.2. That is the kernel Apple ships for macOS virtual machines. It has no SPTM and no TXM, runs on a fairly plain virtual platform (GICv3, PL011 UART, PL031 RTC, virtio PCIe devices) and is the easiest arm64 macOS to bring up without Apple silicon.
 
@@ -51,7 +97,7 @@ A virtual machine around the translator:
 * Bring-up test: own GDT, IDT, paging, APIC, SMP (all cores), AMD-Vi takeover, read-only NVMe and GPT reader. This ran on a real Ryzen 5 5500.
 * **Boot macOS** entry: loads the kernel and device tree from the ESP, reads the RAM disk from an exFAT data partition with a built-in read-only exFAT reader, runs the runtime and blits the guest framebuffer to the screen with the kernel log underneath.
 
-## Status
+### Status of the arm64 research track
 
 What works, measured:
 
