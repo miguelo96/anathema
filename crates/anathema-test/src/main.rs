@@ -79,14 +79,22 @@ fn run() -> Result<bool> {
         });
     }
 
-    let mut esp_ready = false;
-    if cli.skip_kdk {
+    let mut boot_image: Option<PathBuf> = None;
+    if let Some(disk) = cli.disk_img {
+        if !disk.is_file() {
+            bail!("--disk image does not exist: {}", disk.display());
+        }
+        println!("[2/4] Using provided disk image {} (skipping KDK/ESP build)", disk.display());
+        boot_image = Some(disk);
+    } else if cli.skip_kdk {
         println!("[2/4] Skipping KDK download & ESP image (--skip-kdk)");
     } else if let Some(efi) = efi_path.as_deref() {
         println!("[2/4] Preparing KDKs, linking xkc.bin, and building {}...", esp_img.display());
         let step = prepare_esp_image(&repo_root, efi, &cache_dir, &esp_img)?;
         println!("      {} ({:.1}s)", step.status.as_str(), step.duration.as_secs_f64());
-        esp_ready = step.status == StepStatus::Passed && esp_img.is_file();
+        if step.status == StepStatus::Passed && esp_img.is_file() {
+            boot_image = Some(esp_img.clone());
+        }
         steps.push(step);
     } else {
         println!("[2/4] Skipping KDK & ESP image (anathema-xboot.efi unavailable)");
@@ -112,39 +120,42 @@ fn run() -> Result<bool> {
 
     let mut boot_res = None;
     let mut boot_skip: Option<String> = None;
-    if cli.skip_boot || cli.skip_kdk {
+    if cli.skip_boot || (cli.skip_kdk && boot_image.is_none()) {
         boot_skip = Some("disabled by CLI flag".to_string());
         println!("[4/4] Skipping QEMU kernel boot");
-    } else if !esp_ready {
-        boot_skip = Some("ESP image was not built".to_string());
-        println!("[4/4] Skipping QEMU kernel boot (ESP image not built)");
-    } else if let (Some(q), Some(fw)) = (host.qemu_path.as_deref(), host.firmware.as_ref()) {
-        println!("[4/4] Booting {} in QEMU ({}s wait)...", esp_img.display(), cli.boot.wait_secs);
-        match run_qemu_boot(q, fw, &esp_img, &out_dir.join("qemu"), &cli.boot) {
-            Ok(b) => {
-                println!(
-                    "      booted: xboot={}, kext_block={}, jumped={}, waiting_root={}, panic={}",
-                    b.milestones.xboot_started,
-                    b.milestones.kext_block_installed,
-                    b.milestones.kernel_jumped,
-                    b.milestones.waiting_for_root,
-                    b.milestones.kernel_panic
-                );
-                boot_res = Some(b);
+    } else if let Some(img) = boot_image.as_deref() {
+        if let (Some(q), Some(fw)) = (host.qemu_path.as_deref(), host.firmware.as_ref()) {
+            println!("[4/4] Booting {} in QEMU ({}s wait)...", img.display(), cli.boot.wait_secs);
+            match run_qemu_boot(q, fw, img, &out_dir.join("qemu"), &cli.boot) {
+                Ok(b) => {
+                    println!(
+                        "      booted: xboot={}, kext_block={}, jumped={}, waiting_root={}, userspace={}, panic={}",
+                        b.milestones.xboot_started,
+                        b.milestones.kext_block_installed,
+                        b.milestones.kernel_jumped,
+                        b.milestones.waiting_for_root,
+                        b.milestones.userspace_reached,
+                        b.milestones.kernel_panic
+                    );
+                    boot_res = Some(b);
+                }
+                Err(e) => {
+                    boot_skip = Some(format!("QEMU launch failed: {e:#}"));
+                    eprintln!("      QEMU error: {e:#}");
+                }
             }
-            Err(e) => {
-                boot_skip = Some(format!("QEMU launch failed: {e:#}"));
-                eprintln!("      QEMU error: {e:#}");
-            }
+        } else {
+            let missing = if host.qemu_path.is_none() {
+                "qemu-system-x86_64 not found (install QEMU or pass --qemu)"
+            } else {
+                "OVMF/EDK2 firmware not found (pass --ovmf-code/--ovmf-vars or set OVMF_CODE/OVMF_VARS)"
+            };
+            boot_skip = Some(missing.to_string());
+            println!("[4/4] Skipping QEMU kernel boot ({missing})");
         }
     } else {
-        let missing = if host.qemu_path.is_none() {
-            "qemu-system-x86_64 not found (install QEMU or pass --qemu)"
-        } else {
-            "OVMF/EDK2 firmware not found (pass --ovmf-code/--ovmf-vars or set OVMF_CODE/OVMF_VARS)"
-        };
-        boot_skip = Some(missing.to_string());
-        println!("[4/4] Skipping QEMU kernel boot ({missing})");
+        boot_skip = Some("ESP image was not built".to_string());
+        println!("[4/4] Skipping QEMU kernel boot (ESP image not built)");
     }
 
     let md = render_markdown(&ReportInput {
@@ -152,7 +163,7 @@ fn run() -> Result<bool> {
         steps: &steps,
         boot: boot_res.as_ref(),
         boot_skip_reason: boot_skip.as_deref(),
-        esp_img: esp_ready.then_some(esp_img.as_path()),
+        boot_image: boot_image.as_deref(),
     });
     if let Some(parent) = report_path.parent() {
         std::fs::create_dir_all(parent)?;

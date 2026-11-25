@@ -9,6 +9,7 @@ pub struct Cli {
     pub cache_dir: Option<PathBuf>,
     pub out_dir: Option<PathBuf>,
     pub report_path: Option<PathBuf>,
+    pub disk_img: Option<PathBuf>,
     pub qemu_path: Option<PathBuf>,
     pub ovmf_code: Option<PathBuf>,
     pub ovmf_vars: Option<PathBuf>,
@@ -26,13 +27,14 @@ One-command runner that:
   1. builds the anathema-xboot UEFI loader
   2. downloads & unpacks pinned Apple KDKs, links xkc.bin, and builds esp.img
   3. runs all available Rust unit/integration test suites
-  4. boots esp.img in QEMU (Windows, Linux, macOS) and reads serial + kernel debug buffer
+  4. boots esp.img (or --disk IMAGE) in QEMU (Windows, Linux, macOS) and reads serial + debug buffer
   5. writes a Markdown test report
 
 options:
   --cache DIR       KDK cache directory (default: OS cache dir)
   --out DIR         artifact & log output directory (default: <target>/anathema-test)
   --report FILE     report Markdown output path (default: <out>/report.md)
+  --disk FILE       boot a full GPT disk image instead of building/booting esp.img
   --qemu PATH       explicit path to qemu-system-x86_64(.exe)
   --ovmf-code PATH  explicit OVMF/EDK2 code firmware image
   --ovmf-vars PATH  explicit OVMF/EDK2 vars firmware image
@@ -42,7 +44,7 @@ options:
   --machine TYPE    QEMU -machine type (default: q35)
   --accel ACCEL     QEMU -accel backend (default: tcg)
   --skip-tests      skip cargo test suites
-  --skip-kdk        skip KDK download/link and ESP image build (implies --skip-boot)
+  --skip-kdk        skip KDK download/link and ESP image build (implies --skip-boot unless --disk)
   --skip-boot       skip QEMU kernel boot attempt
   -h, --help        show this help";
 
@@ -60,6 +62,7 @@ pub fn parse_args(args: &[String]) -> Result<Cli> {
             "--cache" => cli.cache_dir = Some(PathBuf::from(next()?)),
             "--out" => cli.out_dir = Some(PathBuf::from(next()?)),
             "--report" => cli.report_path = Some(PathBuf::from(next()?)),
+            "--disk" => cli.disk_img = Some(PathBuf::from(next()?)),
             "--qemu" => cli.qemu_path = Some(PathBuf::from(next()?)),
             "--ovmf-code" => cli.ovmf_code = Some(PathBuf::from(next()?)),
             "--ovmf-vars" => cli.ovmf_vars = Some(PathBuf::from(next()?)),

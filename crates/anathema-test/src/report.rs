@@ -10,7 +10,7 @@ pub struct ReportInput<'a> {
     pub steps: &'a [StepResult],
     pub boot: Option<&'a BootResult>,
     pub boot_skip_reason: Option<&'a str>,
-    pub esp_img: Option<&'a Path>,
+    pub boot_image: Option<&'a Path>,
 }
 
 /// Render the full Markdown report.
@@ -44,8 +44,8 @@ pub fn render_markdown(input: &ReportInput<'_>) -> String {
     } else {
         md.push_str("- **UEFI Firmware**: not found\n");
     }
-    if let Some(esp) = input.esp_img {
-        md.push_str(&format!("- **ESP Image**: `{}`\n", esp.display()));
+    if let Some(img) = input.boot_image {
+        md.push_str(&format!("- **Boot Image**: `{}`\n", img.display()));
     }
 
     md.push_str("\n## Build & Test Steps\n\n");
@@ -81,6 +81,7 @@ pub fn render_markdown(input: &ReportInput<'_>) -> String {
         md.push_str(&format!("- **exiting boot services**: {}\n", b.milestones.exiting_boot_services));
         md.push_str(&format!("- **kernel jumped**: {}\n", b.milestones.kernel_jumped));
         md.push_str(&format!("- **waiting for root device**: {}\n", b.milestones.waiting_for_root));
+        md.push_str(&format!("- **userspace reached**: {}\n", b.milestones.userspace_reached));
         md.push_str(&format!("- **kernel panic detected**: {}\n", b.milestones.kernel_panic));
         if let Some(p) = &b.milestones.panic_line {
             md.push_str(&format!("- **Panic line**: `{p}`\n"));

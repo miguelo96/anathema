@@ -9,12 +9,13 @@ use std::time::Duration;
 #[test]
 fn parses_cli_flags() {
     let args: Vec<String> = [
-        "--wait", "90", "--cpu", "Skylake-Client", "--smp", "2", "--accel", "whpx", "--skip-boot",
+        "--disk", "full.img", "--wait", "90", "--cpu", "Skylake-Client", "--smp", "2", "--accel", "whpx", "--skip-boot",
     ]
     .into_iter()
     .map(String::from)
     .collect();
     let cli = parse_args(&args).unwrap();
+    assert_eq!(cli.disk_img, Some(PathBuf::from("full.img")));
     assert_eq!(cli.boot.wait_secs, 90);
     assert_eq!(cli.boot.cpu, "Skylake-Client");
     assert_eq!(cli.boot.smp, 2);
@@ -54,11 +55,15 @@ Waiting on <dict ID=\"0\"><key>IOProviderClass</key></dict>
     assert!(m.exiting_boot_services);
     assert!(m.kernel_jumped);
     assert!(m.waiting_for_root);
+    assert!(!m.userspace_reached);
     assert!(m.kernel_panic);
     assert_eq!(
         m.panic_line.as_deref(),
         Some("panic(cpu 0 caller 0xffffff8000123456): test panic")
     );
+
+    let full = analyze_boot_output("anathema-xboot: start\nanx loadkext tmpfs: 0\nhello, launchd", "");
+    assert!(full.userspace_reached);
 }
 
 #[test]
@@ -127,7 +132,7 @@ fn renders_markdown_report() {
         steps: &steps,
         boot: None,
         boot_skip_reason: Some("qemu-system-x86_64 not found"),
-        esp_img: None,
+        boot_image: None,
     });
     assert!(md.contains("# Anathema Automated Test Report"));
     assert!(md.contains("| anathema-media tests | PASSED | 2.0s |"));

@@ -36,6 +36,7 @@ pub struct BootMilestones {
     pub exiting_boot_services: bool,
     pub kernel_jumped: bool,
     pub waiting_for_root: bool,
+    pub userspace_reached: bool,
     pub kernel_panic: bool,
     pub panic_line: Option<String>,
 }
@@ -209,6 +210,10 @@ pub fn analyze_boot_output(serial: &str, debug_buf: &str) -> BootMilestones {
         exiting_boot_services: serial.contains("anathema-xboot: exiting boot services"),
         kernel_jumped: serial.contains("anathema-xboot: kernel copied, jumping"),
         waiting_for_root: serial.contains("Waiting on <dict") || serial.contains("Still waiting for root device"),
+        userspace_reached: serial.contains("anx loadkext")
+            || serial.contains("anx sandbox")
+            || serial.contains("hello, launchd")
+            || serial.contains("BaseSystem environment"),
         kernel_panic: panic_line.is_some(),
         panic_line,
     }
