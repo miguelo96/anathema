@@ -7,6 +7,7 @@ pub mod feed;
 pub mod hash;
 pub mod http;
 pub mod im4p;
+pub mod kdk;
 pub mod manifest;
 pub mod plist;
 pub mod readat;

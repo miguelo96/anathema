@@ -139,6 +139,39 @@ fn run(args: Vec<String>) -> Result<()> {
             let path = download::download(&c.url, &dir, (!c.sha1.is_empty()).then_some(c.sha1.as_str()))?;
             println!("{}", path.display());
         }
+        "kdk" => {
+            let sub = a.pos.first().map(String::as_str).unwrap_or("");
+            match sub {
+                "fetch" => {
+                    let build = a.pos.get(1).context("usage: kdk fetch <build> [--out DIR]")?;
+                    let k = anathema_media::kdk::pin::by_build(build).with_context(|| format!("no pinned KDK {build}"))?;
+                    let dir = a.opt("out").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+                    let target = dir.join(k.url.rsplit('/').next().unwrap());
+                    let mut last = std::time::Instant::now();
+                    download::download_verified(k.url, &target, k.size, k.sha256, &mut |have, len| {
+                        if last.elapsed().as_secs() >= 2 {
+                            eprint!("\r{:5.1}%  {:.2} / {:.2} GB   ", have as f64 * 100.0 / len.max(1) as f64, have as f64 / 1e9, len as f64 / 1e9);
+                            last = std::time::Instant::now();
+                        }
+                    })?;
+                    eprintln!();
+                    println!("{}", target.display());
+                }
+                "extract" => {
+                    let (Some(dmg), Some(out)) = (a.pos.get(1), a.pos.get(2)) else { bail!("usage: kdk extract <dmg> <outdir>") };
+                    let mut last = std::time::Instant::now();
+                    let r = anathema_media::kdk::extract::extract(Path::new(dmg), Path::new(out), &mut |done, total| {
+                        if last.elapsed().as_secs() >= 2 {
+                            eprint!("\r{:5.1}%   ", done as f64 * 100.0 / total.max(1) as f64);
+                            last = std::time::Instant::now();
+                        }
+                    })?;
+                    eprintln!();
+                    println!("{} files, {} bytes, longest path {}", r.files, r.bytes, r.longest_path);
+                }
+                _ => bail!("usage: kdk fetch <25G342|26B131> [--out DIR] | kdk extract <dmg> <outdir>"),
+            }
+        }
         "ls" => {
             let src = open_source(&resolve_source(&a)?)?;
             let z = zip::Zip::open(&*src)?;
@@ -342,7 +375,7 @@ fn run(args: Vec<String>) -> Result<()> {
         }
         _ => {
             eprintln!(
-                "usage: anathema-media <command>\n  list [--product P]\n  products\n  resolve [--product P] [--build B]\n  download [--product P] [--build B] [--out DIR]\n  ls [ipsw|url]\n  manifest [ipsw|url] [--product P] [--class C] [--variant V]\n  im4p <ipsw|url> <member> [out]\n  aea-info <ipsw|url> <member>\n  decrypt <ipsw|url> <member> --out FILE\n  extract-member <ipsw|url> <member> --out FILE"
+                "usage: anathema-media <command>\n  list [--product P]\n  products\n  resolve [--product P] [--build B]\n  download [--product P] [--build B] [--out DIR]\n  kdk fetch <25G342|26B131> [--out DIR]\n  kdk extract <dmg> <outdir>\n  ls [ipsw|url]\n  manifest [ipsw|url] [--product P] [--class C] [--variant V]\n  im4p <ipsw|url> <member> [out]\n  aea-info <ipsw|url> <member>\n  decrypt <ipsw|url> <member> --out FILE\n  extract-member <ipsw|url> <member> --out FILE"
             );
         }
     }

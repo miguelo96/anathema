@@ -201,7 +201,11 @@ pub fn parse(text: &str) -> Result<Value> {
                     "string" => place(&mut stack, &mut root, Value::Str(content))?,
                     "integer" => {
                         let t = content.trim();
-                        let v = t.parse::<i64>().or_else(|_| t.parse::<u64>().map(|v| v as i64))?;
+                        // like plistlib: a 0x prefix means hex, anything else is decimal
+                        let v = match t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+                            Some(h) => u64::from_str_radix(h, 16)? as i64,
+                            None => t.parse::<i64>().or_else(|_| t.parse::<u64>().map(|v| v as i64))?,
+                        };
                         place(&mut stack, &mut root, Value::Int(v))?
                     }
                     "real" => place(&mut stack, &mut root, Value::Real(content.trim().parse()?))?,

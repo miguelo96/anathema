@@ -28,3 +28,19 @@ pub fn sha1_reader(mut r: impl Read, progress: &mut dyn FnMut(u64)) -> std::io::
     }
     Ok(hex(&h.finalize()))
 }
+
+pub fn sha256_reader(mut r: impl Read, progress: &mut dyn FnMut(u64)) -> std::io::Result<String> {
+    let mut h = sha2::Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    let mut total = 0u64;
+    loop {
+        let n = r.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+        total += n as u64;
+        progress(total);
+    }
+    Ok(hex(&h.finalize()))
+}

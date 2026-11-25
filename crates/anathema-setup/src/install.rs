@@ -1,5 +1,5 @@
 use crate::disk::{self, Disk, NewPart, Part};
-use crate::fat32;
+use anathema_setup::{fat32, kernel_files};
 use std::{
     fs,
     io::{Seek, SeekFrom, Write},
@@ -135,7 +135,7 @@ fn esp_letter(disk: &Disk, part: &Part, ctx: &mut Context) -> Result<char, Strin
     Ok(letter)
 }
 
-pub fn update_boot(disk: &Disk, efi: &[u8], ctx: &mut Context) -> Result<(), String> {
+pub fn update_boot(disk: &Disk, efi: &[u8], files: &[fat32::FileSpec], ctx: &mut Context) -> Result<(), String> {
     check_target(disk)?;
     let part = esp_part(disk).ok_or("this stick has no EFI partition to update")?.clone();
     (ctx.progress)(0.05, "Locating the EFI partition");
@@ -169,7 +169,41 @@ pub fn update_boot(disk: &Disk, efi: &[u8], ctx: &mut Context) -> Result<(), Str
         (ctx.log)("The EFI partition has no EFI folder, nothing to back up".into());
     }
 
-    (ctx.progress)(0.55, "Writing the Anathema boot image");
+    // everything that is written, with what it replaces, must fit before anything is written
+    let esp_path = |p: &str| esp.join(p.replace('/', "\\"));
+    let mut planned: Vec<fat32::FileSpec> = files.to_vec();
+    planned.push(fat32::FileSpec { path: "EFI/anathema/anathema.efi", data: efi });
+    let existing: Vec<(String, u64)> = planned
+        .iter()
+        .filter_map(|f| fs::metadata(esp_path(f.path)).ok().map(|m| (f.path.to_string(), m.len())))
+        .collect();
+    let esp_free = disk::free_bytes(&format!("{letter}:\\"));
+    if !ctx.dry_run {
+        kernel_files::update_plan(esp_free, &existing, &planned)?;
+    }
+
+    // kernel files first, loader last: a failure part way leaves the old loader in place
+    let ordered = kernel_files::update_order(files);
+    let extra: Vec<&fat32::FileSpec> = ordered.iter().filter(|f| f.path != "EFI/BOOT/BOOTX64.EFI").collect();
+    for (i, f) in extra.iter().enumerate() {
+        let target = esp_path(f.path);
+        (ctx.log)(format!("Writing {} ({} bytes)", target.display(), f.data.len()));
+        (ctx.progress)(0.55 + 0.25 * i as f32 / extra.len().max(1) as f32, "Writing the kernel files");
+        if ctx.dry_run {
+            continue;
+        }
+        if let Some(dir) = target.parent() {
+            fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+        }
+        let name = target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let staged = target.with_file_name(format!("{name}.new"));
+        fs::write(&staged, f.data).map_err(|e| format!("cannot write {}: {e}", staged.display()))?;
+        fs::rename(&staged, &target).map_err(|e| format!("cannot replace {}: {e}", target.display()))?;
+        if fs::read(&target).map_err(|e| e.to_string())? != f.data {
+            return Err(format!("verification failed: {} differs from what was written", target.display()));
+        }
+    }
+    (ctx.progress)(0.85, "Writing the Anathema boot image");
     let boot_dir = efi_dir.join("BOOT");
     let anathema_dir = efi_dir.join("anathema");
     let target = boot_dir.join("BOOTX64.EFI");
@@ -186,8 +220,11 @@ pub fn update_boot(disk: &Disk, efi: &[u8], ctx: &mut Context) -> Result<(), Str
         if written != efi {
             return Err("verification failed: BOOTX64.EFI differs from the image".into());
         }
+        (ctx.log)("Verified BOOTX64.EFI".into());
+    }
+    if !ctx.dry_run {
         disk::flush_letter(letter);
-        (ctx.log)("Verified BOOTX64.EFI and flushed the volume".into());
+        (ctx.log)("Verified the kernel files and flushed the volume".into());
     }
     (ctx.progress)(1.0, "Finished");
     Ok(())
@@ -201,7 +238,7 @@ fn check_target(disk: &Disk) -> Result<(), String> {
     Ok(())
 }
 
-pub fn fresh_install(disk: &Disk, efi: &[u8], ctx: &mut Context) -> Result<(), String> {
+pub fn fresh_install(disk: &Disk, files: &[fat32::FileSpec], ctx: &mut Context) -> Result<(), String> {
     check_target(disk)?;
     if disk.sector != 512 {
         return Err(format!("sector size {} is not supported, only 512", disk.sector));
@@ -237,8 +274,10 @@ pub fn fresh_install(disk: &Disk, efi: &[u8], ctx: &mut Context) -> Result<(), S
         thread::sleep(Duration::from_millis(1500));
     }
     (ctx.progress)(0.35, "Formatting the EFI partition");
-    let regions = fat32::build(ESP_BYTES / 512, (esp_offset / 512) as u32, "ANATHEMA", efi)?;
-    (ctx.log)(format!("FAT32 EFI partition with EFI/BOOT/BOOTX64.EFI ({} bytes)", efi.len()));
+    let regions = fat32::build(ESP_BYTES / 512, (esp_offset / 512) as u32, "ANATHEMA", files)?;
+    for f in files {
+        (ctx.log)(format!("FAT32 EFI partition: {} ({} bytes)", f.path, f.data.len()));
+    }
     if !ctx.dry_run {
         let mut guard = None;
         for _ in 0..8 {

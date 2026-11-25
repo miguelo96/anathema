@@ -5,11 +5,21 @@ edition = "2021"
 license = "MIT"
 publish = false
 
+[lib]
+name = "anathema_setup"
+path = "src/lib.rs"
+
 [[bin]]
 name = "anathema-setup"
 path = "src/main.rs"
 
+[[bin]]
+name = "anathema-esp"
+path = "src/bin/esp.rs"
+
 [dependencies]
+anathema-kc = { path = "../anathema-kc" }
+anathema-media = { path = "../anathema-media" }
 eframe = { version = "0.33", default-features = false, features = ["glow", "default_fonts"] }
 
 [dependencies.windows-sys]
